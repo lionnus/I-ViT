@@ -353,7 +353,7 @@ class IntLayerNorm(nn.LayerNorm):
     def forward(self, x, scaling_factor=None):
         if self.dim_sqrt is None:
             n = torch.tensor(x.shape[2], dtype=torch.float)
-            self.dim_sqrt = torch.sqrt(n).cuda()
+            self.dim_sqrt = torch.sqrt(n).cuda(device=x.device)
 
         # Normalization: computes mean and variance(std)
         x_int = x / scaling_factor
@@ -437,7 +437,7 @@ class IntGELU(nn.Module):
         exp_int_sum.clamp_max_(2**31-1)
         factor = floor_ste.apply((2 ** 31-1) / exp_int_sum)
         sigmoid_int = floor_ste.apply(exp_int * factor / 2 ** (31-self.output_bit+1))
-        sigmoid_scaling_factor = torch.Tensor([1 / 2 ** (self.output_bit-1)]).cuda()
+        sigmoid_scaling_factor = torch.Tensor([1 / 2 ** (self.output_bit-1)]).cuda(device=x.device)
 
         x_int = pre_x_int * sigmoid_int
         scaling_factor = scaling_factor * sigmoid_scaling_factor
@@ -491,7 +491,7 @@ class IntSoftmax(nn.Module):
         exp_int_sum.clamp_max_(2**31-1)
         factor = floor_ste.apply((2**31-1) / exp_int_sum)
         exp_int = floor_ste.apply(exp_int * factor / 2 ** (31-self.output_bit+1))
-        scaling_factor = torch.Tensor([1 / 2 ** (self.output_bit-1)]).cuda()
+        scaling_factor = torch.Tensor([1 / 2 ** (self.output_bit-1)]).cuda(device=x.device)
 
         self.act_scaling_factor = scaling_factor
         return exp_int * scaling_factor, scaling_factor
