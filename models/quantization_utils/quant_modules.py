@@ -341,7 +341,7 @@ class IntLayerNorm(nn.LayerNorm):
                 elementwise_affine=True):
         super(IntLayerNorm, self).__init__(normalized_shape, eps, elementwise_affine)
         self.dim_sqrt = None
-        self.register_buffer('norm_scaling_factor', torch.zeros(1))
+        self.register_buffer('norm_scaling_factor', torch.zeros(normalized_shape))
         self.register_buffer('bias_integer', torch.zeros_like(self.bias))
 
     def fix(self):
