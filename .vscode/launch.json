@@ -1,0 +1,62 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "inference.py single image",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "inference.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--single-image",
+                "example.jpg",
+                "--device",
+                "cuda:0",
+                "--weights",
+                "results_deit-t_16bit/checkpoint.pth.tar"
+            ],
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
+            "name": "inference.py evaluate latest",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "inference.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--batch-size",
+                "128",
+                "--device",
+                "cuda:0"
+            ],
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
+            "name": "inference.py evaluate 16bit",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "inference.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--batch-size",
+                "128",
+                "--device",
+                "cuda:0",
+                "--weights",
+                "results_deit-t_16bit/checkpoint.pth.tar"
+            ],
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}"
+        }
+    ]
+}

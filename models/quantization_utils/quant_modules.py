@@ -1,3 +1,7 @@
+"""
+Extended quantized layers with a light-weight I/O-statistics collector.
+"""
+
 import torch
 import time
 import numpy as np
@@ -5,9 +9,97 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.multiprocessing as mp
 from torch.nn import Parameter
+import pandas as pd  # used only at export time of IO stats
+from functools import partial
 
 from .quant_utils import *
 
+# -------------------------------------------------------------------------
+#                           I/O-stat collector
+# -------------------------------------------------------------------------
+_LAYER_IO_STATS = []        # global buffer (unchanged)
+
+def _collect_io_stats(module, inputs, output, module_name):
+    """
+    Record integer extrema + shapes for every layer call.
+    For layers with two runtime inputs (e.g. QuantMatMul) it also logs
+    per-input min/max + shape.
+    """
+    try:
+        # ----------- unpack main in/out tensors & scales -----------
+        x_scaled = inputs[0]
+        scale_x  = inputs[1] if len(inputs) > 1 and torch.is_tensor(inputs[1]) else None
+
+        y_scaled = output[0] if isinstance(output, (tuple, list)) else output
+        scale_y  = output[1] if isinstance(output, (tuple, list)) and torch.is_tensor(output[1]) else None
+
+        xs, ys = x_scaled.detach(), y_scaled.detach()
+        xs_int = xs / scale_x if scale_x is not None else None
+        ys_int = ys / scale_y if scale_y is not None else None
+
+        rec = {
+            "layer":       module_name,
+            "type":        module.__class__.__name__,
+            "min_in_int":  xs_int.min().item()  if xs_int is not None else None,
+            "max_in_int":  xs_int.max().item()  if xs_int is not None else None,
+            "min_out_int": ys_int.min().item()  if ys_int is not None else None,
+            "max_out_int": ys_int.max().item()  if ys_int is not None else None,
+            "shape_in":    tuple(xs.shape),
+            "shape_out":   tuple(ys.shape),
+        }
+
+        # ----------- extra block for two-input layers -----------
+        if isinstance(module, QuantMatMul):
+            # A == inputs[0],  scale_A == inputs[1]
+            # B == inputs[2],  scale_B == inputs[3]
+            A, sA = inputs[0].detach(), inputs[1]
+            B, sB = inputs[2].detach(), inputs[3]
+            A_int, B_int = A / sA, B / sB
+
+            rec.update({
+                "min_A_int":  A_int.min().item(),
+                "max_A_int":  A_int.max().item(),
+                "shape_A":    tuple(A.shape),
+                "min_B_int":  B_int.min().item(),
+                "max_B_int":  B_int.max().item(),
+                "shape_B":    tuple(B.shape),
+            })
+
+        _LAYER_IO_STATS.append(rec)
+
+    except Exception:
+        # swallow any hook errors so evaluation never breaks
+        pass
+
+def attach_io_stat_hooks(model: nn.Module):
+    """Recursively attach `_collect_io_stats` as a forward hook to every sub-module.
+    """
+    for name, module in model.named_modules():
+        if module is model:  # skip the top-level container to avoid double-logging
+            continue
+        module.register_forward_hook(partial(_collect_io_stats, module_name=name))
+
+
+def get_io_stats_df() -> pd.DataFrame:
+    """Return a new DataFrame of all gathered statistics."""
+    return pd.DataFrame(_LAYER_IO_STATS)
+
+
+def save_io_stats_df(path: str = "io_stats.pkl", to_csv: bool = False) -> pd.DataFrame:
+    """Export collected statistics to `path` (Pickle), plus optional CSV.
+
+    Returns the DataFrame so callers may inspect / pretty-print immediately.
+    """
+    df = get_io_stats_df()
+    df.to_pickle(path)
+    if to_csv:
+        csv_path = path.rsplit(".", 1)[0] + ".csv"
+        df.to_csv(csv_path, index=False)
+    return df
+
+# -------------------------------------------------------------------------
+#                           Original quantized layers
+# -------------------------------------------------------------------------
 
 class QuantLinear(nn.Linear):
     """
@@ -324,6 +416,7 @@ class QuantConv2d(nn.Conv2d):
 
         pre_act_scaling_factor = pre_act_scaling_factor.view(1, -1, 1, 1)
         x_int = x / pre_act_scaling_factor
+        x_int.to(dtype=torch.int32)
         correct_output_scale = bias_scaling_factor.view(1, -1, 1, 1)
 
         return (F.conv2d(x_int, self.weight_integer, self.bias_integer, self.stride, self.padding,
@@ -358,6 +451,8 @@ class IntLayerNorm(nn.LayerNorm):
         # Normalization: computes mean and variance(std)
         x_int = x / scaling_factor
         mean_int = round_ste.apply(x_int.mean(axis=2, keepdim=True))
+        x_int = x_int.to(dtype=torch.int32)
+        mean_int = mean_int.to(dtype=torch.int32)
         y_int = x_int - mean_int
         y_sq_int = y_int ** 2
         var_int = torch.sum(y_sq_int, axis=2, keepdim=True)
@@ -408,6 +503,7 @@ class IntGELU(nn.Module):
         pass
 
     def int_exp_shift(self, x_int, scaling_factor):
+        x_int = x_int.to(dtype=torch.int32)
         x_int = x_int + floor_ste.apply(x_int / 2) - floor_ste.apply(x_int / 2 ** 4)
 
         with torch.no_grad():
@@ -424,6 +520,7 @@ class IntGELU(nn.Module):
 
     def forward(self, x, scaling_factor=None):
         pre_x_int = x / scaling_factor
+        pre_x_int = pre_x_int.to(dtype=torch.int32)
         scaling_factor_sig = scaling_factor * 1.702
 
         x_int_max, _ = pre_x_int.max(dim=-1, keepdim=True)
@@ -482,6 +579,7 @@ class IntSoftmax(nn.Module):
 
     def forward(self, x, scaling_factor):
         x_int = x / scaling_factor
+        x_int.to(dtype=torch.int32)
         x_int_max, _ = x_int.max(dim=-1, keepdim=True)
         x_int = x_int - x_int_max
 

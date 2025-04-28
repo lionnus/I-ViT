@@ -1,1 +1,1 @@
-from .quant_modules import QuantLinear, QuantAct, QuantConv2d, QuantMatMul, IntLayerNorm, IntSoftmax, IntGELU
+from .quant_modules import QuantLinear, QuantAct, QuantConv2d, QuantMatMul, IntLayerNorm, IntSoftmax, IntGELU, attach_io_stat_hooks, save_io_stats_df
