@@ -47,11 +47,11 @@ class Attention(nn.Module):
             dim,
             dim
         )
-        self.qact3 = QuantAct(16)
-        self.qact_softmax = QuantAct()
+        self.qact3 = QuantAct(8)
+        # self.qact_softmax = QuantAct()
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop = nn.Dropout(proj_drop)
-        self.int_softmax = IntSoftmax(16)
+        self.int_softmax = IntSoftmax(8)
 
         self.matmul_1 = QuantMatMul()
         self.matmul_2 = QuantMatMul()
@@ -115,7 +115,7 @@ class Block(nn.Module):
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(
             drop_path) if drop_path > 0.0 else nn.Identity()
-        self.qact2 = QuantAct(16)
+        self.qact2 = QuantAct(8)
         self.norm2 = norm_layer(dim)
         self.qact3 = QuantAct()
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -125,7 +125,7 @@ class Block(nn.Module):
             act_layer=act_layer,
             drop=drop
         )
-        self.qact4 = QuantAct(16)
+        self.qact4 = QuantAct(8)
 
     def forward(self, x_1, act_scaling_factor_1):
         x, act_scaling_factor = self.norm1(x_1, act_scaling_factor_1)
@@ -171,7 +171,7 @@ class VisionTransformer(nn.Module):
         self.num_features = (
             self.embed_dim
         ) = embed_dim  # num_features for consistency with other models
-        norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
+        norm_layer = norm_layer or partial(nn.LayerNorm)
 
         self.qact_input = QuantAct()
 
@@ -189,8 +189,8 @@ class VisionTransformer(nn.Module):
 
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        self.qact_pos = QuantAct(16)
-        self.qact1 = QuantAct(16)
+        self.qact_pos = QuantAct(8)
+        self.qact1 = QuantAct(8)
 
         dpr = [
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
@@ -290,7 +290,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
         num_heads=3,
         mlp_ratio=4,
         qkv_bias=True,
-        norm_layer=partial(IntLayerNorm, eps=1e-6),
+        norm_layer=partial(IntLayerNorm),
         **kwargs,
     )
     if pretrained:
@@ -311,7 +311,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
         num_heads=6,
         mlp_ratio=4,
         qkv_bias=True,
-        norm_layer=partial(IntLayerNorm, eps=1e-6),
+        norm_layer=partial(IntLayerNorm),
         **kwargs
     )
     if pretrained:
@@ -331,7 +331,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
         num_heads=12,
         mlp_ratio=4,
         qkv_bias=True,
-        norm_layer=partial(IntLayerNorm, eps=1e-6),
+        norm_layer=partial(IntLayerNorm),
         **kwargs
     )
     if pretrained:
@@ -351,7 +351,7 @@ def vit_base_patch16_224(pretrained=False, **kwargs):
         num_heads=12,
         mlp_ratio=4,
         qkv_bias=True,
-        norm_layer=partial(IntLayerNorm, eps=1e-6),
+        norm_layer=partial(IntLayerNorm),
         **kwargs
     )
     if pretrained:
@@ -370,7 +370,7 @@ def vit_large_patch16_224(pretrained=False, **kwargs):
         num_heads=16,
         mlp_ratio=4,
         qkv_bias=True,
-        norm_layer=partial(IntLayerNorm, eps=1e-6),
+        norm_layer=partial(IntLayerNorm),
         **kwargs
     )
     if pretrained:

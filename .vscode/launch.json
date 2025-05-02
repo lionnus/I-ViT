@@ -5,6 +5,29 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "quant_train.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "quant_train.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--batch-size",
+                "128",
+                "--device",
+                "cuda:1",
+                "--epochs",
+                "30",
+                "--model",
+                "deit_tiny",
+                "--data",
+                "/scratch2/ml_datasets/ILSVRC2012",
+                "--lr",
+                "5e-7"
+            ],
+            "justMyCode": false,
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
             "name": "inference.py single image",
             "type": "debugpy",
             "request": "launch",
