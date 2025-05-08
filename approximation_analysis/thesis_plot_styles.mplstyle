@@ -1,0 +1,63 @@
+# -----------------------------------------------------------------------------
+# IEEE‑style Matplotlib stylesheet
+# -----------------------------------------------------------------------------
+# Designed for single‑column figures (~3.5 in wide) in IEEE conference/journal
+# papers.  Adapt sizes for double‑column by overriding figure.figsize.
+# Modern, colour‑blind‑safe palette (Okabe–Ito + accents).
+# -----------------------------------------------------------------------------
+
+# -------- Figure layout -------------------------------------------------------
+figure.figsize            : 3.5, 2.5   # width, height in inches
+figure.dpi                : 300        # high‑resolution for publications
+savefig.dpi               : 300
+figure.autolayout         : True       # tight‑layout by default
+
+# -------- Fonts ---------------------------------------------------------------
+font.family               : serif
+font.serif                : Times New Roman, Times, Liberation Serif
+font.size                 : 8          # base font size (≈ 8 pt for IEEE)
+pdf.fonttype              : 42         # embed TrueType
+ps.fonttype               : 42
+
+# -------- Axes ----------------------------------------------------------------
+axes.titlesize            : 8
+axes.titleweight          : bold
+axes.labelsize            : 8
+axes.labelweight          : regular
+axes.linewidth            : 0.6
+axes.grid                 : True
+axes.grid.which           : both
+axes.grid.axis            : both
+
+# Grid styling (subtle, thin dashed lines)
+grid.color                : 0.8
+grid.linewidth            : 0.4
+grid.linestyle            : --
+
+# -------- Ticks ----------------------------------------------------------------
+xtick.labelsize           : 7
+ytick.labelsize           : 7
+xtick.direction           : in
+ytick.direction           : in
+xtick.major.width         : 0.6
+ytick.major.width         : 0.6
+xtick.minor.width         : 0.4
+ytick.minor.width         : 0.4
+xtick.minor.visible       : True
+ytick.minor.visible       : True
+
+# -------- Legend --------------------------------------------------------------
+legend.fontsize           : 7
+legend.frameon            : False
+legend.loc                : best
+
+# -------- Lines & markers -----------------------------------------------------
+lines.linewidth           : 1.0
+lines.markersize          : 4
+
+# -------- Colour cycle --------------------------------------------------------
+# Modern, colour‑blind‑friendly palette (Okabe & Ito, plus neutral grey)
+axes.prop_cycle           : cycler('color', ['#0077BB', '#33BBEE', '#009988', '#EE7733', '#CC3311', '#EE3377', '#BBBBBB'])
+
+# -------- Misc ----------------------------------------------------------------
+errorbar.capsize          : 2
