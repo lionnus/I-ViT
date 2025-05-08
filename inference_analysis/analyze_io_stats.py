@@ -68,6 +68,10 @@ def summarise(df: pd.DataFrame, out: Path):
         if sub.empty:
             continue
         out_lines.append(f"{typ.upper()} (stats across all calls)")
+        out_lines.append(f"  scale_in_min : {sub['scale_in'].min()}")
+        out_lines.append(f"  scale_in_max : {sub['scale_in'].max()}")
+        out_lines.append(f"  scale_out_min: {sub['scale_out'].min()}")
+        out_lines.append(f"  scale_out_max: {sub['scale_out'].max()}")
         out_lines.append(f"  min_in_int : {sub['min_in_int'].min()}")
         out_lines.append(f"  max_in_int : {sub['max_in_int'].max()}")
         out_lines.append(f"  min_out_int: {sub['min_out_int'].min()}")

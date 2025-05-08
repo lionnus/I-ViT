@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-evaluate_deit_tiny.py – inference / evaluation utility for DeiT‑tiny
+evaluate_deit_tiny.py - inference / evaluation utility for DeiT‑tiny
 ====================================================================
 Two modes of operation
 ---------------------
@@ -26,6 +26,8 @@ import torchvision.transforms as T
 from PIL import Image
 from torch.utils.data import DataLoader
 import torchvision
+from models import *
+from utils import *
 
 # --- project‑specific imports -------------------------------------------------
 from models import deit_tiny_patch16_224
@@ -50,7 +52,12 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000):
     model.load_state_dict(checkpoint, strict=False)
     model.to(device)
     model.eval()
-    attach_io_stat_hooks(model)
+    # One dummy forward pass to warm up the model
+    dummy_input = torch.randn(1, 3, 224, 224, device=device)
+    with torch.no_grad():
+        _ = model(dummy_input)
+    # Freeze the model to prevent further training
+    freeze_model(model)
     return model
 
 
@@ -85,12 +92,12 @@ def predict_single(model, img: torch.Tensor, device, labels_map: dict[int, str] 
     model.eval()
     with torch.no_grad():
         logits = model(img.unsqueeze(0).to(device))
-        probs = F.softmax(logits, dim=1)[0]
+        probs = F.softmax(logits, dim=1)[0]#TODO remove float softmax
         top5_prob, top5_idx = probs.topk(5)
     print("Top‑5 predictions:")
     for rank, (p, idx) in enumerate(zip(top5_prob.tolist(), top5_idx.tolist()), 1):
         label = labels_map.get(idx, str(idx)) if labels_map else str(idx)
-        print(f"  #{rank}: class {idx:4} – {label:<25}  |  p={p:.4f}")
+        print(f"  #{rank}: class {idx:4} - {label:<25}  |  p={p:.4f}")
 
 
 # -----------------------------------------------------------------------------
@@ -129,25 +136,27 @@ def main():
     if args.export_onnx is not None:
         # Create a dummy input with batch size 1 (change shape as needed)
         dummy_input = torch.randn(1, 3, 224, 224, device=device)
-        traced = torch.jit.trace(model, dummy_input)
+        # traced = torch.jit.trace(model, dummy_input)
+        # print(traced.graph)
         # Save the traced model
         onnx_output = args.export_onnx
         # Export the model to ONNX format
         torch.onnx.export(
-            traced,
+            model,
             dummy_input,
             onnx_output,
             verbose=False,
             input_names=["input"],
             output_names=["output"],
             opset_version=16,
-            operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK,
+            operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
             export_params=True,
-            do_constant_folding=True,
+            do_constant_folding=True
         )
-        print("ONNX model exported →", args.export_onnx)
+        print("ONNX model exported ->", args.export_onnx)
         return
-
+    # Attach IO stat hooks to the model
+    attach_io_stat_hooks(model)
     # ───────── single‑image inference ────────────────────────────────────
     if args.single_image is not None:
         img_path = Path(args.single_image)

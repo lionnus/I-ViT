@@ -40,6 +40,12 @@ def _collect_io_stats(module, inputs, output, module_name):
         rec = {
             "layer":       module_name,
             "type":        module.__class__.__name__,
+            "min_in":    xs.min().item()  if xs is not None else None,
+            "max_in":    xs.max().item()  if xs is not None else None,
+            "min_out":   ys.min().item()  if ys is not None else None,
+            "max_out":   ys.max().item()  if ys is not None else None,
+            "scale_in":  scale_x.item() if scale_x is not None else None,
+            "scale_out": scale_y.item() if scale_y is not None else None,
             "min_in_int":  xs_int.min().item()  if xs_int is not None else None,
             "max_in_int":  xs_int.max().item()  if xs_int is not None else None,
             "min_out_int": ys_int.min().item()  if ys_int is not None else None,
