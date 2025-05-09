@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-plt.style.use('thesis_plot_styles.mplstyle')
+plt.style.use('approximation_analysis/thesis_plot_styles.mplstyle')
 import logging
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -133,78 +134,115 @@ class IntGELU_IBERT(nn.Module):
 
         return x_int * scaling_factor, scaling_factor
 
-if __name__ == '__main__':
-    # 1. choose scale and inputs
-    full_scale = 6
-    scale_ivit =  full_scale / (2 ** (8))
-    scale_ibert = full_scale / (2 ** (16))
-    x = torch.linspace(-full_scale/2, full_scale/2, 128+1)
+# ------------------------------------------------------------------
+# Helper: figure sizing that respects the stylesheet ----------------
+# ------------------------------------------------------------------
+
+def new_figure(nrows: int = 1, height_mul: float = 1.0):
+    """Return a (fig, axes) tuple sized for *nrows* stacked subplots."""
+    width, base_h = plt.rcParams['figure.figsize']
+    fig_height = base_h * height_mul
+    return plt.subplots(nrows=nrows, ncols=1 if nrows == 1 else 2,
+                        figsize=(width, fig_height))
+
+# ------------------------------------------------------------------
+# Comparison & plotting routine ------------------------------------
+# ------------------------------------------------------------------
+
+def run_comparison():
+    # 1. Input range & scaling factors -----------------------------
+    full_scale   = 5.6
+    scale_ivit   = full_scale / (2 ** 8)
+    scale_ibert  = full_scale / (2 ** 16)
+    x = torch.linspace(-full_scale / 2, full_scale / 2, 257)
     y_float = F.gelu(x)
 
-    # 2. IViT approximation
-    ivit = IntGELU_IViT(8)
+    # 2. Integer approximations ------------------------------------
+    ivit  = IntGELU_IViT(8)
     y_ivit, _ = ivit(x, scaling_factor=torch.tensor(scale_ivit))
-    # y_ivit = y_ivit*2**(8 - 1
-    abs_err_ivit = (y_ivit - y_float).abs()
 
-    # 3. IBERT approximation
-    ibert = IntGELU_IBERT()
-    y_iber, _ = ibert(x, scaling_factor=torch.tensor(scale_ibert))
-    abs_err_iber = (y_iber - y_float).abs()
+    ibert = IntGELU_IBERT(8)
+    y_ibert, _ = ibert(x, scaling_factor=torch.tensor(scale_ibert))
 
-    # Print metrics
-    print("=== IViT IntGELU ===")
-    print(f"max error: {abs_err_ivit.max():.5f}")
-    print(f"mean error: {abs_err_ivit.mean():.5f}\n")
-    # Percentage error
-    print("=== IViT IntGELU (percentage) ===")
-    print(f"max error: {100*abs_err_ivit.max() / y_float.max():.5f}")
-    print(f"mean error: {100*abs_err_ivit.mean() / y_float.mean():.5f}\n")
-    # Percentage error
-    print("=== IBERT IntGELU (percentage) ===")
-    print(f"max error: {100*abs_err_iber.max() / y_float.max():.5f}")
-    print(f"mean error: {100*abs_err_iber.mean() / y_float.mean():.5f}\n")
+    # 3. Errors ------------------------------------------------------
+    abs_err_ivit  = (y_ivit  - y_float).abs()
+    abs_err_ibert = (y_ibert - y_float).abs()
+    rel_err_ivit  = abs_err_ivit  / (y_float.abs() + 1e-10) * 100.0
+    rel_err_ibert = abs_err_ibert / (y_float.abs() + 1e-10) * 100.0
 
-    print("=== IBERT IntGELU ===")
-    print(f"max error: {abs_err_iber.max():.5f}")
-    print(f"mean error: {abs_err_iber.mean():.5f}\n")
+    # 4. Metrics printout -------------------------------------------
+    def _stats(name, ae, re):
+        print(f"=== {name} ===\n"
+              f"Max abs error : {ae.max():.6f}\n"
+              f"Mean abs error: {ae.mean():.6f}\n"
+              f"Max % error  : {re.max():.2f}%\n"
+              f"Mean % error : {re.mean():.2f}%\n")
+    _stats("I-ViT IntGELU",  abs_err_ivit,  rel_err_ivit)
+    _stats("I-BERT IntGELU", abs_err_ibert, rel_err_ibert)
 
-    # Plot both approximations and error
-    plt.figure(figsize=(6,4))
-    plt.plot(x, y_float, label="float GELU")
-    plt.plot(x, y_ivit, '--', label="IntGELU_IViT")
-    plt.plot(x, y_iber, ':', label="IntGELU_IBERT")
-    plt.legend(); plt.grid(True); plt.title("GELU vs Integer Approximations")
-    plt.show()
+    # 5. Figure with 4 panels --------------------------------------
+    fig, axes = new_figure(nrows=2, height_mul=2)  # height≈5 in
+    ax11, ax12 = axes[0]
+    ax21, ax22 = axes[1]
 
-    plt.figure(figsize=(6,4))
-    plt.plot(x, abs_err_ivit, '--', label="err IViT")
-    plt.plot(x, abs_err_iber, ':', label="err IBERT")
-    plt.legend(); plt.grid(True); plt.title("Absolute Error")
-    plt.show()
+    # (a) GELU & approximations
+    ax11.plot(x, y_float, label="Float GELU")
+    ax11.plot(x, y_ivit,  '--', label="I-ViT IntGELU")
+    ax11.plot(x, y_ibert, ':',  label="I-BERT IntGELU")
+    ax11.set_title("GELU vs Integer Approximations")
+    ax11.set_xlabel("Input x")
+    ax11.set_ylabel("GELU(x)")
+    ax11.legend()
 
-    # ------------------------------------------------------------------
-    # 4. Exponent approximation (IViT only)
-    # ------------------------------------------------------------------
-    sig_scale = torch.tensor(scale_ivit * 1.702)       # same scaling used inside forward()
-    x_int_exp = torch.floor(x / sig_scale).to(torch.int32)
+    # (b) absolute error
+    ax12.plot(x, abs_err_ivit,  label="I-ViT abs err")
+    ax12.plot(x, abs_err_ibert, label="I-BERT abs err")
+    ax12.set_title("Absolute Error")
+    ax12.set_xlabel("Input x")
+    ax12.set_ylabel("|error|")
+    ax12.legend()
 
-    exp_int, exp_scale = ivit.int_exp_shift(x_int_exp, sig_scale)
-    y_exp_ivit = exp_int * exp_scale                   # integer‑domain exp approximation
-    y_exp_true = torch.exp(x)                          # reference
+    # (c) percentage error
+    ax21.plot(x, rel_err_ivit,  label="I-ViT % err")
+    ax21.plot(x, rel_err_ibert, label="I-BERT % err")
+    ax21.set_title("Percentage Error")
+    ax21.set_xlabel("Input x")
+    ax21.set_ylabel("Error (%)")
+    ax21.legend()
 
-    abs_err_exp = (y_exp_ivit - y_exp_true).abs()
+    # (d) log-scale absolute error
+    ax22.semilogy(x, abs_err_ivit,  '--', label="I-ViT abs err")
+    ax22.semilogy(x, abs_err_ibert, ':',  label="I-BERT abs err")
+    ax22.set_title("Absolute Error (log-scale)")
+    ax22.set_xlabel("Input x")
+    ax22.set_ylabel("|error|")
+    ax22.legend()
 
-    print("=== IViT int_exp_shift (exp) ===")
-    print(f"max error: {abs_err_exp.max():.5f}")
-    print(f"mean error: {abs_err_exp.mean():.5f}\n")
+    fig.show()
 
-    # Plot exponent approximation and its error
-    plt.plot(x, y_exp_true, label="exp(x)")
-    plt.plot(x, y_exp_ivit, '--', label="IntGELU_IViT exp approx")
-    plt.legend(); plt.grid(True); plt.title("Exponent Approximation")
-    plt.show()
+    # 6. Bin-wise error distribution -------------------------------
+    fig2, ax = new_figure()  # single-panel figure (3.5×2.5 in)
+    bins = np.linspace(-full_scale / 2, full_scale / 2, 11)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    ivit_bin_err  = []
+    ibert_bin_err = []
+    for i in range(len(bins) - 1):
+        mask = (x >= bins[i]) & (x < bins[i + 1])
+        if torch.any(mask):
+            ivit_bin_err.append(rel_err_ivit[mask].mean().item())
+            ibert_bin_err.append(rel_err_ibert[mask].mean().item())
+        else:
+            ivit_bin_err.append(0.0)
+            ibert_bin_err.append(0.0)
+    width = 0.35
+    ax.bar(bin_centers - width / 2, ivit_bin_err,  width, label='I-ViT')
+    ax.bar(bin_centers + width / 2, ibert_bin_err, width, label='I-BERT')
+    ax.set_xlabel('Input range')
+    ax.set_ylabel('Average % error')
+    ax.set_title('Error distribution across input range')
+    ax.legend()
+    fig2.show()
 
-    plt.plot(x, abs_err_exp, '--', label="abs error exp")
-    plt.legend(); plt.grid(True); plt.title("Absolute Error (Exponent Approximation)")
-    plt.show()
+
+if __name__ == "__main__":
+    run_comparison()
