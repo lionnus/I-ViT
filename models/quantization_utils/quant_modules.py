@@ -717,7 +717,7 @@ class IntSoftmax(nn.Module):
         q = floor_ste.apply(x_int / x0_int)
         r = x_int - x0_int * q
         exp_int, exp_scaling_factor = self.int_polynomial(r, scaling_factor)
-        exint_softmaxp_int = torch.clamp(floor_ste.apply(exp_int * 2 ** (self.n - q)), min=0)
+        exp_int = torch.clamp(floor_ste.apply(exp_int * 2 ** (self.n - q)), min=0)
         scaling_factor = exp_scaling_factor / 2 ** self.n
         return exp_int, scaling_factor
 
@@ -740,6 +740,7 @@ class IntSoftmax(nn.Module):
         exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
 
         factor = floor_ste.apply(2**32 / exp_int_sum)
-        exp_int = floor_ste.apply(exp_int * factor / 2 ** (32 - self.output_bit))
-        scaling_factor = 1 / 2 ** self.output_bit
+        exp_int = floor_ste.apply(exp_int * factor / 2 ** (32 - self.output_bit + 1))
+        # scaling_factor = 1 / 2 ** self.output_bit / 2 # TODO Integrate /2-> now fixing the output to 16 bit signed, instead of 16 bit unsigned.
+        scaling_factor = torch.Tensor([2 / 2 ** (self.output_bit)]).cuda(device=x.device)
         return exp_int * scaling_factor, scaling_factor
