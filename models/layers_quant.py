@@ -136,7 +136,7 @@ class Mlp(nn.Module):
             hidden_features,
             out_features
         )
-        self.qact2 = QuantAct(16)
+        self.qact2 = QuantAct(8)
         self.drop = nn.Dropout(drop)
 
         self.qact_gelu = QuantAct()
@@ -178,7 +178,7 @@ class PatchEmbed(nn.Module):
         if self.norm_layer:
             self.qact_before_norm = QuantAct()
             self.norm = norm_layer(embed_dim)
-        self.qact = QuantAct(16)
+        self.qact = QuantAct(8)
 
 
     def forward(self, x, act_scaling_factor):
