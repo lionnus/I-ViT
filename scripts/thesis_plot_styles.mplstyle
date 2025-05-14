@@ -53,7 +53,7 @@ legend.loc                : best
 
 # -------- Lines & markers -----------------------------------------------------
 lines.linewidth           : 1.0
-lines.markersize          : 4
+lines.markersize          : 1.5
 
 # -------- Colour cycle --------------------------------------------------------
 # Modern, colour‑blind‑friendly palette (Okabe & Ito, plus neutral grey)

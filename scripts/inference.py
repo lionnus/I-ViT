@@ -1,20 +1,21 @@
 #!/usr/bin/env python
+# Author: Lionnus Kesting (lkesting@ethz.ch)
 """
-evaluate_deit_tiny.py - inference / evaluation utility for DeiT‑tiny
+evaluate_deit_tiny.py - inference / evaluation utility for DeiT-tiny
 ====================================================================
 Two modes of operation
 ---------------------
 1. **Dataset evaluation** (default)
-   Evaluate on an ImageNet‑style validation set and report Top‑1/Top‑5 accuracy.
+   Evaluate on an ImageNet-style validation set and report Top-1/Top-5 accuracy.
 
-2. **Single‑image inference** via `--single-image [<path>]`
-   Run the model on exactly one image (default: `sample.png`).
-   Prints the Top‑5 predicted class indices (or the human‑readable labels if
-   `--labels` is given), saves the per‑layer IO‑stats, and exits.
+2. **Single-image inference** via `--single-image [<path>]`
+   Run the model on one sample image (default: `sample.png`).
+   Prints the Top-5 predicted class indices (or the human-readable labels if
+   `--labels` is given), saves the per-layer IO-stats, and exits.
 
-The script keeps `attach_io_stat_hooks` in both modes so the same statistics
-are collected.  After forward‑pass completion it writes them via
-`save_io_stats_df`, naming the file automatically based on the mode.
+In both modes statistics about the model are collected using `attach_io_stat_hooks`.
+After forward-pass completion it writes them via `save_io_stats_df`, naming the 
+file automatically based on the mode.
 """
 
 from __future__ import annotations
@@ -29,9 +30,9 @@ import torchvision
 from models import *
 from utils import *
 
-# --- project‑specific imports -------------------------------------------------
-from models import deit_tiny_patch16_224
-from models.quantization_utils.quant_modules import attach_io_stat_hooks, save_io_stats_df
+# --- project-specific imports -------------------------------------------------
+# from models import deit_tiny_patch16_224
+# from models.quantization_utils.quant_modules import attach_io_stat_hooks, save_io_stats_df
 
 # -----------------------------------------------------------------------------
 #  Helpers
@@ -62,7 +63,7 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000):
 
 
 def preprocess_image(path: Path | str) -> torch.Tensor:
-    """Load and normalise a single image for DeiT‑tiny (224×224)."""
+    """Load and normalise a single image for DeiT-tiny (224×224)."""
     tf = T.Compose([
         T.Resize(int(224 * 1.14)),  # 256 if you prefer standard
         T.CenterCrop(224),
@@ -88,27 +89,27 @@ def evaluate_dataset(model, data_loader, device):
 
 
 def predict_single(model, img: torch.Tensor, device, labels_map: dict[int, str] | None):
-    """Run forward pass on *one* image tensor and print Top‑5."""
+    """Run forward pass on *one* image tensor and print Top-5."""
     model.eval()
     with torch.no_grad():
         logits = model(img.unsqueeze(0).to(device))
         probs = F.softmax(logits, dim=1)[0]#TODO remove float softmax
         top5_prob, top5_idx = probs.topk(5)
-    print("Top‑5 predictions:")
+    print("Top-5 predictions:")
     for rank, (p, idx) in enumerate(zip(top5_prob.tolist(), top5_idx.tolist()), 1):
         label = labels_map.get(idx, str(idx)) if labels_map else str(idx)
         print(f"  #{rank}: class {idx:4} - {label:<25}  |  p={p:.4f}")
 
 
 # -----------------------------------------------------------------------------
-#  CLI / entry‑point
+#  CLI / entry-point
 # -----------------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="Evaluate DeiT‑tiny or run single‑image inference")
+    ap = argparse.ArgumentParser(description="Evaluate DeiT-tiny or run single-image inference")
     ap.add_argument("--weights", default="results/checkpoint.pth.tar",
                     help="Path to model checkpoint (*.pth.tar)")
-    ap.add_argument("--device", default="cuda:0",
+    ap.add_argument("--device", default="cuda:1",
                     help="Compute device (e.g. 'cuda:0' or 'cpu')")
 
     # Dataset mode
@@ -116,15 +117,17 @@ def main():
                     help="Path to ImageNet root containing 'val'. If omitted and --single-image is not set, script aborts.")
     ap.add_argument("--batch-size", type=int, default=128, help="Validation batch size")
 
-    # Single‑image mode
+    # Single-image mode
     ap.add_argument("--single-image", nargs="?", const="sample.png", default=None,
                     help="Run on exactly one image. If the flag is given without a value, uses 'sample.png'.")
     ap.add_argument("--labels", default=None,
-                    help="Optional JSON mapping class‑id → label for pretty output")
+                    help="Optional JSON mapping class-id → label for pretty output")
 
     # Export
     ap.add_argument("--export-onnx", default=None,
                     help="Export the model to ONNX and exit (path to *.onnx)")
+    ap.add_argument("--ort", action="store_true",
+                    help="Run ORT extended graph fusions on the exported ONNX model")
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -134,13 +137,11 @@ def main():
     
     # If --export-onnx flag is provided, export to ONNX and exit.
     if args.export_onnx is not None:
-        # Create a dummy input with batch size 1 (change shape as needed)
+        # Create a dummy input tensor for the model
         dummy_input = torch.randn(1, 3, 224, 224, device=device)
-        # traced = torch.jit.trace(model, dummy_input)
-        # print(traced.graph)
-        # Save the traced model
-        onnx_output = args.export_onnx
         # Export the model to ONNX format
+        onnx_output = args.export_onnx
+        # 1) Export FP32 ONNX
         torch.onnx.export(
             model,
             dummy_input,
@@ -153,11 +154,24 @@ def main():
             export_params=True,
             do_constant_folding=True
         )
-        print("ONNX model exported ->", args.export_onnx)
+        # print("ONNX model exported ->", onnx_output)
+
+        # 2) Optionally run ORT extended graph fusions
+        if args.ort:
+            import onnxruntime as ort
+            so = ort.SessionOptions()
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+            so.optimized_model_filepath = onnx_output
+            # create session to trigger optimization and dump optimized model
+            _ = ort.InferenceSession(onnx_output, sess_options=so)
+            print("Optimized (ORT_ENABLE_EXTENDED) model saved ->", onnx_output)
+        else:
+            print("ONNX model exported ->", onnx_output)
+            
         return
     # Attach IO stat hooks to the model
     attach_io_stat_hooks(model)
-    # ───────── single‑image inference ────────────────────────────────────
+    # ───────── single-image inference ────────────────────────────────────
     if args.single_image is not None:
         img_path = Path(args.single_image)
         if not img_path.exists():
@@ -192,7 +206,7 @@ def main():
                         num_workers=16, pin_memory=True)
 
     top1, top5 = evaluate_dataset(model, loader, device)
-    print(f"Validation set: Top‑1 = {top1:.2f}%  |  Top‑5 = {top5:.2f}%")
+    print(f"Validation set: Top-1 = {top1:.2f}%  |  Top-5 = {top5:.2f}%")
     save_io_stats_df("io_stats_val.pkl", to_csv=True)
 
 

@@ -1,8 +1,18 @@
+#!/usr/bin/env python3
+# gelu_approx_analysis.py
+# --------------------------------------------------------------
+# Comparison of GELU approximations from I-ViT and I-BERT
+# Approximations taken from: 
+# I-BERT: https://github.com/kssteven418/I-BERT/ and 
+# I-ViT: https://github.com/zkkli/I-ViT
+# Author: Lionnus Kesting (lkesting@ethz.ch)
+# --------------------------------------------------------------
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-plt.style.use('approximation_analysis/thesis_plot_styles.mplstyle')
+plt.style.use('scripts/thesis_plot_styles.mplstyle')
 import logging
 import numpy as np
 
@@ -97,7 +107,7 @@ class IntGELU_IBERT(nn.Module):
         self.quant_mode = quant_mode
 
         self.k = 1.4142
-        self.n = 14  # sufficiently large integer
+        self.n = 6  # sufficiently large integer
         self.coeff = [-0.2888, -1.769, 1]  # a(x+b)**2 + c
         self.coeff[2] /= self.coeff[0]
 
@@ -135,7 +145,7 @@ class IntGELU_IBERT(nn.Module):
         return x_int * scaling_factor, scaling_factor
 
 # ------------------------------------------------------------------
-# Helper: figure sizing that respects the stylesheet ----------------
+# Helper: figure sizing that respects the stylesheet
 # ------------------------------------------------------------------
 
 def new_figure(nrows: int = 1, height_mul: float = 1.0):
@@ -146,22 +156,23 @@ def new_figure(nrows: int = 1, height_mul: float = 1.0):
                         figsize=(width, fig_height))
 
 # ------------------------------------------------------------------
-# Comparison & plotting routine ------------------------------------
+# Comparison & plotting routine
 # ------------------------------------------------------------------
 
 def run_comparison():
     # 1. Input range & scaling factors -----------------------------
-    full_scale   = 5.6
-    scale_ivit   = full_scale / (2 ** 8)
-    scale_ibert  = full_scale / (2 ** 16)
-    x = torch.linspace(-full_scale / 2, full_scale / 2, 257)
+    full_scale   = 6
+    bit_width    = 8
+    scale_ivit   = full_scale / (2 ** bit_width)
+    scale_ibert  = full_scale / (2 ** bit_width)
+    x = torch.linspace(-full_scale / 2, full_scale / 2, 2**(bit_width-1)+1)
     y_float = F.gelu(x)
 
     # 2. Integer approximations ------------------------------------
-    ivit  = IntGELU_IViT(8)
+    ivit  = IntGELU_IViT(bit_width)
     y_ivit, _ = ivit(x, scaling_factor=torch.tensor(scale_ivit))
 
-    ibert = IntGELU_IBERT(8)
+    ibert = IntGELU_IBERT(bit_width)
     y_ibert, _ = ibert(x, scaling_factor=torch.tensor(scale_ibert))
 
     # 3. Errors ------------------------------------------------------

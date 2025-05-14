@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """
-analyze_io_stats_simple.py  -  concise integer-range summary
+analyze_io_stats_simple.py
 ===========================================================
 Reads the CSV written by  save_io_stats_df(..., to_csv=True)  
-containing integer extrema and shapes plus separate QuantMatMul and QuantLinear fields.
+containing integer extrema and shapes of the input and output tensors
+of the quantized layers in a PyTorch model.
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ def summarise(df: pd.DataFrame, out: Path):
     out_lines.append("")
 
     # ── Per–quant-module stats ────────────────────────────────────────────
-    # List every special module you want reported
+    # List off all the special modules
     special_types = [
         "QuantAct",
         "QuantConv2d",
@@ -113,7 +114,7 @@ def summarise(df: pd.DataFrame, out: Path):
 
     # Write to disk & echo to console
     out.write_text("\n".join(out_lines))
-    print("Summary written →", out.resolve())
+    print("Summary written ->", out.resolve())
 
 
 # ---------------------------------------------------------------------------

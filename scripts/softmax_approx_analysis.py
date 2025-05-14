@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# softmax_int_approximations.py
+# softmax_approx_analysis.py
 # --------------------------------------------------------------
-#  Integer‑domain Softmax approximations from
-#   ‑ I‑ViT  (“Shiftmax”)  -> IntSoftmax_IVIT
-#   ‑ IBERT  (“Polynomial+Shift”) -> IntSoftmax_IBERT
+# Comparison of the softmax approximations of I-ViT and I-BERT
+# Approximations taken from: 
+# I-BERT: https://github.com/kssteven418/I-BERT/ and 
+# I-ViT: https://github.com/zkkli/I-ViT
+# Author: Lionnus Kesting (lkesting@ethz.ch)
 # --------------------------------------------------------------
 
 import argparse
@@ -18,29 +20,15 @@ import matplotlib.pyplot as plt
 
 # personal style
 try:
-    plt.style.use("thesis_plot_styles.mplstyle")
+    plt.style.use("scripts/thesis_plot_styles.mplstyle")
 except IOError:
     pass
 
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# Small utility stubs so the script is self‑contained
+# Simplified QuantAct with min and max from training
 # ------------------------------------------------------------------
-class _FloorSTE(torch.autograd.Function):
-    """Straight‑through estimator for floor()"""
-    @staticmethod
-    def forward(ctx, x):
-        return torch.floor(x)
-
-    @staticmethod
-    def backward(ctx, g):
-        # identity gradient → straight‑through
-        return g
-
-
-floor_ste = _FloorSTE.apply
-
 
 class QuantAct:
     """
@@ -78,7 +66,7 @@ class QuantAct:
 
 
 # ------------------------------------------------------------------
-# I‑ViT Shiftmax
+# I-ViT Softmax
 # ------------------------------------------------------------------
 class IntSoftmax_IVIT(nn.Module):
     """
@@ -91,14 +79,14 @@ class IntSoftmax_IVIT(nn.Module):
         self.register_buffer('act_scaling_factor', torch.zeros(1))
 
     # ----------------------------------------------------------
-    # integer exponential (same as in IntGELU_IVIT)
+    # integer exponential approximation
     # ----------------------------------------------------------
     def int_exp_shift(self, x_int: torch.Tensor, scaling_factor: torch.Tensor):
         """
         Integer approximation of exp(x) in Q-domain
         """
         # --- Shift approximation of exp(x) ---------------------
-        x_int = x_int + floor_ste(x_int / 2) - floor_ste(x_int / 16)
+        x_int = x_int + torch.floor(x_int / 2) - torch.floor(x_int / 16)
 
         with torch.no_grad():
             x0_int = torch.floor(-1.0 / scaling_factor).to(x_int.device)
@@ -106,13 +94,13 @@ class IntSoftmax_IVIT(nn.Module):
         x_int = torch.max(x_int, self.n * x0_int)
 
         # quotient / remainder decomposition
-        q = floor_ste(x_int / x0_int)
+        q = torch.floor(x_int / x0_int)
         r = x_int - x0_int * q
 
         # build exp(r/q)
         exp_int = r / 2 - x0_int
         exp_int = torch.clamp(
-            floor_ste(exp_int * 2 ** (self.n - q)),
+            torch.floor(exp_int * 2 ** (self.n - q)),
             min=0
         )
         scaling_factor = scaling_factor / 2 ** self.n
@@ -126,7 +114,7 @@ class IntSoftmax_IVIT(nn.Module):
         Parameters
         ----------
         x               : (…, N) tensor of *floating* activations
-        scaling_factor  : scalar tensor, same as in I‑ViT paper
+        scaling_factor  : scalar tensor
         """
         device = x.device
         scaling_factor = scaling_factor.to(device)
@@ -135,7 +123,7 @@ class IntSoftmax_IVIT(nn.Module):
         x_int = x / scaling_factor
         x_int = x_int.to(torch.int32)
 
-        # 2) subtract (per‑row) max for numerical stability
+        # 2) subtract (per-row) max for numerical stability
         x_int_max, _ = x_int.max(dim=-1, keepdim=True)
         x_int = x_int - x_int_max
 
@@ -145,9 +133,9 @@ class IntSoftmax_IVIT(nn.Module):
         # 4) normalise
         exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
         exp_int_sum.clamp_max_(2 ** 31 - 1)
-        factor = floor_ste((2 ** 31 - 1) / exp_int_sum)
+        factor = torch.floor((2 ** 31 - 1) / exp_int_sum)
 
-        exp_int = floor_ste(exp_int * factor / 2 ** (31 - self.output_bit + 1))
+        exp_int = torch.floor(exp_int * factor / 2 ** (31 - self.output_bit + 1))
         scaling_factor = torch.tensor(
             1.0 / 2 ** (self.output_bit - 1),
             device=device
@@ -163,8 +151,8 @@ class IntSoftmax_IVIT(nn.Module):
 # ------------------------------------------------------------------
 class IntSoftmax_IBERT(nn.Module):
     """
-    Polynomial‑based int Softmax from IBERT.
-    Minor edits: CPU‑friendly & QuantAct stub
+    Polynomial-based int Softmax from IBERT.
+    Minor edits: on CPU instead of GPU
     """
     def __init__(self,
                  output_bit=8,
@@ -178,8 +166,8 @@ class IntSoftmax_IBERT(nn.Module):
             logger.info("Force dequantise softmax")
             self.quant_mode = 'none'
 
-        # `QuantAct` could fuse a straight‑through fake‑quant
-        self.act = QuantAct(16)
+        # QuantAct
+        self.act = QuantAct(8) #NOTE Originally 16 bit
 
         # polynomial / shift parameters
         self.x0 = -0.6931                      # −ln(2)
@@ -207,12 +195,12 @@ class IntSoftmax_IBERT(nn.Module):
 
         x_int = torch.max(x_int, self.n * x0_int)
 
-        q = floor_ste(x_int / x0_int)
+        q = torch.floor(x_int / x0_int)
         r = x_int - x0_int * q
 
         exp_int, exp_scale = self.int_polynomial(r, scaling_factor)
         exp_int = torch.clamp(
-            floor_ste(exp_int * 2 ** (self.n - q)),
+            torch.floor(exp_int * 2 ** (self.n - q)),
             min=0
         )
         scaling_factor = exp_scale / 2 ** self.n
@@ -237,26 +225,26 @@ class IntSoftmax_IBERT(nn.Module):
         x_int_max, _ = x_int.max(dim=-1, keepdim=True)
         x_int = x_int - x_int_max
 
-        # 3) integer exp, then a fake‑quant (QuantAct)
+        # 3) integer exp, then a fake-quant (QuantAct)
         exp_int, exp_scale = self.int_exp(x_int, scaling_factor)
         exp_q, exp_scale = self.act(exp_int, exp_scale)  # identity in stub
         exp_int = exp_q / exp_scale
 
         # 4) denominator
         exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
-        factor = floor_ste(2 ** 32 / exp_int_sum)
+        factor = torch.floor(2 ** 32 / exp_int_sum)
 
-        # 5) scale into desired output bit‑width
-        exp_int = floor_ste(exp_int * factor / 2 ** (32 - self.output_bit))
+        # 5) scale into desired output bit-width
+        exp_int = torch.floor(exp_int * factor / 2 ** (32 - self.output_bit + 1)) # NOTE added +1 because output was not correct bitwidth
         scaling_factor = torch.tensor(
-            1.0 / 2 ** self.output_bit,
+           2.0 * 1.0 / 2 ** self.output_bit, # NOTE added 2.0* to match the output bitwidth
             device=device
         )
         return exp_int * scaling_factor, scaling_factor
 
 
 # ------------------------------------------------------------------
-# Helper: pretty error stats
+# Helper: print error stats
 # ------------------------------------------------------------------
 def print_stats(name: str, err: torch.Tensor):
     print(
@@ -289,26 +277,40 @@ def main():
         help="Text file containing a single scaling-factor value",
     )
     parser.add_argument("--output-bit", type=int, default=8)
+    
+    parser.add_argument(
+        "--shape",
+        type=str,
+        default=None,
+        help="Original tensor shape, comma-separated, e.g. 128,3,197,197"
+    )
     args = parser.parse_args()
-
+    
     # ----------------------------------------------------------
     # 1.  Load or generate test data
     # ----------------------------------------------------------
     if args.x_file and args.x_file.exists() and args.scale_file and args.scale_file.exists():
         x_np = np.loadtxt(args.x_file, dtype=np.float32)
         scale_value = float(np.loadtxt(args.scale_file))
-        x = torch.tensor(x_np, dtype=torch.float32).unsqueeze(0)  # shape (1, N)
         scale_ivit = scale_ibert = scale_value
+
+        if args.shape is None:
+            raise ValueError(
+                "--shape is required when you pass a batched tensor; "
+                "example: --shape 128,3,197,197"
+            )
+
+        tgt_shape = tuple(int(s) for s in args.shape.split(","))
+        x = torch.tensor(x_np, dtype=torch.float32).view(*tgt_shape)
         print(f"Loaded x shape {x.shape}, scaling_factor {scale_value}")
     else:
-        # throw error
         raise ValueError("No valid input files provided. Please provide --x-file and --scale-file.")
 
     device = torch.device("cpu")
     x = x.to(device)
 
     # ----------------------------------------------------------
-    # 2.  Ground‑truth float softmax
+    # 2.  Ground-truth float softmax
     # ----------------------------------------------------------
     y_float = F.softmax(x, dim=-1)
 
@@ -318,60 +320,81 @@ def main():
     ivit = IntSoftmax_IVIT(output_bit=args.output_bit)
     ibert = IntSoftmax_IBERT(output_bit=args.output_bit, quant_mode="symmetric")
 
-    y_ivit, _ = ivit(x, scaling_factor=torch.tensor(scale_ivit))
-    y_ibert, _ = ibert(x, scaling_factor=torch.tensor(scale_ibert))
-
+    y_ivit, scaling_ivit_out = ivit(x, scaling_factor=torch.tensor(scale_ivit))
+    y_ibert, scaling_ibert_out = ibert(x, scaling_factor=torch.tensor(scale_ibert))
+    
     abs_err_ivit = (y_ivit - y_float).abs()
     abs_err_ibert = (y_ibert - y_float).abs()
-
-   # ── 4) Visualization and error analysis ───────────────────────────────────────
-    # ── 4) Visualization and error analysis ───────────────────────────────────────
-
+    
+    # ----------------------------------------------------------
+    # 4.  Visualization and error analysis
+    # ----------------------------------------------------------
     # 4.1 Print existing error‐stats
-    print_stats("IViT IntSoftmax", abs_err_ivit)
-    print_stats("IBERT IntSoftmax", abs_err_ibert)
+    print_stats("I-ViT IntSoftmax", abs_err_ivit)
+    print_stats("I-BERT IntSoftmax", abs_err_ibert)
 
-    # 4.2 Bar chart for the (single) sample
-    N = x.size(-1)
-    classes = np.arange(N)
-    idx = 0  # only one row in x
-    plt.figure(figsize=(6,4))
-    plt.bar(classes - 0.2, y_float[idx].cpu().numpy(),   width=0.2, label="float")
-    plt.bar(classes      , y_ivit[idx].cpu().numpy(),    width=0.2, label="IViT")
-    plt.bar(classes + 0.2, y_ibert[idx].cpu().numpy(),   width=0.2, label="IBERT")
-    plt.title("Softmax distributions")
-    plt.xlabel("class index")
-    plt.ylabel("probability")
-    plt.legend(); plt.grid(True)
+        
+    # 4.2 Bar chart: pick a representative/random row
+    sel = (0, 0, 0)               # (batch, head, token)
+    true_row  = y_float [sel].cpu().numpy()
+    ivit_row  = y_ivit  [sel].cpu().numpy()
+    ibert_row = y_ibert [sel].cpu().numpy()
+
+    classes = np.arange(true_row.size)
+    # plt.figure(figsize=(7, 4))
+    plt.bar(classes - 0.2, true_row,  width=0.2, label="float")
+    plt.bar(classes      , ivit_row,  width=0.2, label="IViT")
+    plt.bar(classes + 0.2, ibert_row, width=0.2, label="IBERT")
+    plt.title(f"Softmax for sample {sel}")
+    plt.xlabel("class index"); plt.ylabel("probability")
+    plt.legend(); plt.grid(True); plt.show()
+
+    # 4.3 Scatter plot on subset
+    flat_true  = y_float .view(-1).cpu().numpy()
+    flat_ivit  = y_ivit  .view(-1).cpu().numpy()
+    flat_ibert = y_ibert .view(-1).cpu().numpy()
+
+    keep = slice(None, None, 20)   # keep every n-th point/downsample
+    plt.scatter(flat_true[keep], flat_ivit [keep],
+            s=3, alpha=0.9, marker='.', linewidths=0,
+            label="I-ViT")
+    plt.scatter(flat_true[keep], flat_ibert[keep],
+                s=3, alpha=0.9, marker='.', linewidths=0,
+                label="I-BERT")
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=0.7)
+    plt.title("Float vs Integer Softmax (128 batch size, 197 model dim)")
+    plt.xlabel("Float Softmax"); plt.ylabel("IntSoftmax")
+    leg = plt.legend(scatterpoints=1, markerscale=6)  # markerscale increases legend dot size
+    
+    # now override the alpha on the legend
+    for handle in leg.legend_handles:
+        handle.set_alpha(1.0)
+    plt.grid(True); plt.tight_layout()
+    # save plot as png in high dpi
+    # plt.savefig("Softmax_comparison_batch_v1.png", dpi=300, bbox_inches='tight')
     plt.show()
 
-    # 4.3 Scatter plot: true vs approx probabilities
-    flat_true   = y_float .view(-1).cpu().numpy()
-    flat_ivit   = y_ivit  .view(-1).cpu().numpy()
-    flat_ibert  = y_ibert .view(-1).cpu().numpy()
-    plt.figure(figsize=(6,4))
-    plt.scatter(flat_true, flat_ivit,  alpha=0.3, s=5, label="IViT")
-    plt.scatter(flat_true, flat_ibert, alpha=0.3, s=5, label="IBERT")
-    plt.plot([0,1],[0,1], 'k--')
-    plt.title("True vs Approx Softmax")
-    plt.xlabel("soft_true")
-    plt.ylabel("soft_approx")
-    plt.legend(); plt.grid(True)
+    
+    # 4.3 Density plot with hexbin
+    plt.hexbin(flat_true, flat_ivit, gridsize=60, cmap='Blues', mincnt=1, linewidths=0.2, alpha=0.9)
+    plt.hexbin(flat_true, flat_ibert, gridsize=60, cmap='Oranges', mincnt=1, linewidths=0.2, alpha=0.6)
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=0.7)
+    plt.title("Float vs Integer Softmax - density view")
+    plt.xlabel("Float Softmax"); plt.ylabel("IntSoftmax")
+    cb = plt.colorbar(label="count per bin")
+    plt.grid(True); plt.tight_layout()
     plt.show()
-
     # 4.4 Histogram of absolute errors
     err_ivit_vals  = abs_err_ivit .view(-1).cpu().numpy()
     err_ibert_vals = abs_err_ibert.view(-1).cpu().numpy()
-    plt.figure(figsize=(6,4))
-    plt.hist(err_ivit_vals,  bins=50, density=True, alpha=0.5, label="IViT")
-    plt.hist(err_ibert_vals, bins=50, density=True, alpha=0.5, label="IBERT")
+    # plt.figure(figsize=(6,4))
+    plt.hist(err_ivit_vals,  bins=50, density=True, alpha=0.5, label="I-ViT")
+    plt.hist(err_ibert_vals, bins=50, density=True, alpha=0.5, label="I-BERT")
     plt.title("Distribution of |error|")
     plt.xlabel("absolute error")
     plt.ylabel("density")
     plt.legend(); plt.grid(True)
     plt.show()
-
-
 
 if __name__ == "__main__":
     main()
