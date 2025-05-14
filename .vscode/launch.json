@@ -31,7 +31,7 @@
             "name": "scripts/inference.py single image 8 bit",
             "type": "debugpy",
             "request": "launch",
-            "program": "scripts/inference.py",
+            "module": "scripts.inference",
             "console": "integratedTerminal",
             "args": [
                 "--single-image",
@@ -47,7 +47,7 @@
             "name": "scripts/inference.py single image 16 bit",
             "type": "debugpy",
             "request": "launch",
-            "program": "scripts/inference.py",
+            "module": "scripts.inference",
             "console": "integratedTerminal",
             "args": [
                 "--single-image",
@@ -70,12 +70,10 @@
                 "128",
                 "--device",
                 "cuda:1",
-                "--weights",
-                "results/checkpoint.pth.tar",
                 "--data-path",
                 "/scratch2/ml_datasets/ILSVRC2012",
                 "--onnx",
-                "${input: onnxModel}"
+                "${input:onnxModel}"
             ],
             "python": "${workspaceFolder}/myenv/bin/python"
         },
@@ -83,7 +81,7 @@
             "name": "scripts/inference.py evaluate latest",
             "type": "debugpy",
             "request": "launch",
-            "program": "scripts/inference.py",
+            "module": "scripts.inference",
             "console": "integratedTerminal",
             "args": [
                 "--batch-size",
@@ -101,7 +99,7 @@
             "name": "scripts/inference.py evaluate 8bit",
             "type": "debugpy",
             "request": "launch",
-            "program": "scripts/inference.py",
+            "module": "scripts.inference",
             "console": "integratedTerminal",
             "args": [
                 "--batch-size",
@@ -119,7 +117,7 @@
             "name": "scripts/inference.py evaluate 16bit",
             "type": "debugpy",
             "request": "launch",
-            "program": "scripts/inference.py",
+            "module": "scripts.inference",
             "console": "integratedTerminal",
             "args": [
                 "--batch-size",
@@ -134,10 +132,10 @@
             "python": "${workspaceFolder}/myenv/bin/python"
         },
         {
-            "name": "softmax_comparison.py external data and scale",
+            "name": "softmax_approx_analysis.py external data and scale",
             "type": "debugpy",
             "request": "launch",
-            "program": "scripts/softmax_comparison.py",
+            "program": "scripts/softmax_approx_analysis.py",
             "console": "integratedTerminal",
             "args": [
                 "--x-file",
@@ -163,7 +161,7 @@
             "id": "onnxModel",
             "type": "promptString",
             "description": "Enter the path to the ONNX model file",
-            "default": "ivitbert-patched-8bit-sim.onnx"
+            "default": "${workspaceFolder}/scripts/onnx_model.onnx"
         }
     ]
 }
