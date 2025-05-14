@@ -260,7 +260,6 @@ class fixedpoint_mul(Function):
         return grad_output.clone() / ctx.z_scaling_factor, None, None, None, None, \
                identity_grad, None
 
-#TODO Check this higly suspicious float function
 def softmax(x, dim: int, onnx_trace: bool = False):
     if onnx_trace:
         return F.softmax(x.float(), dim=dim)

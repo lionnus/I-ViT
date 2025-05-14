@@ -485,7 +485,7 @@ class IntLayerNorm(nn.Module):
                  normalized_shape,
                  output_bit=8,
                  overflow_handling=True,
-                 quant_mode='none',
+                 quant_mode='symmetric',
                  force_dequant='none',
                  elementwise_affine=True,
                  eps=1e-5):
@@ -505,7 +505,7 @@ class IntLayerNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(self.normalized_shape))
         self.eps = eps
 
-        self.activation = QuantAct(output_bit, quant_mode=self.quant_mode)
+        # self.activation = QuantAct(output_bit, quant_mode=self.quant_mode)
         if self.quant_mode == "none":
             pass
         elif quant_mode == "symmetric":
@@ -552,7 +552,7 @@ class IntLayerNorm(nn.Module):
 
         if self.dim_sqrt is None:
             n = torch.tensor(x.shape[2], dtype=torch.float) # feature dim(768)
-            self.dim_sqrt = torch.sqrt(n).cuda()
+            self.dim_sqrt = torch.sqrt(n).cuda(device=x.device)
 
         # Normalization: computes mean and variance(std)
         x_int = x / scaling_factor
@@ -597,7 +597,7 @@ class IntGELU(nn.Module):
         Force dequantize GELU if either 'gelu' or 'nonlinear' is given.
     """
     def __init__(self,
-                 quant_mode='none',
+                 quant_mode='symmetric',
                  force_dequant='none'):
         super(IntGELU, self).__init__()
         self.register_buffer('input_scaling_factor', torch.ones(1))
@@ -617,7 +617,7 @@ class IntGELU(nn.Module):
             raise ValueError("unknown quant mode: {}".format(quant_mode))
 
         self.k = 1.4142
-        self.n = 14 # sufficiently large integer
+        self.n = 6 # sufficiently large integer
         self.coeff = [-0.2888, -1.769, 1] # a(x+b)**2 + c
         self.coeff[2] /= self.coeff[0]
 
