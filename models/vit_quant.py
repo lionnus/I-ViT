@@ -28,7 +28,9 @@ class Attention(nn.Module):
             qkv_bias=False,
             qk_scale=None,
             attn_drop=0.0,
-            proj_drop=0.0):
+            proj_drop=0.0,
+            bitwidth_out=8,
+            bitwidth_softmax=8):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -47,11 +49,10 @@ class Attention(nn.Module):
             dim,
             dim
         )
-        self.qact3 = QuantAct(8)
-        # self.qact_softmax = QuantAct()
+        self.qact3 = QuantAct(bitwidth_out)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop = nn.Dropout(proj_drop)
-        self.int_softmax = IntSoftmax(8)
+        self.int_softmax = IntSoftmax(bitwidth_softmax)
 
         self.matmul_1 = QuantMatMul()
         self.matmul_2 = QuantMatMul()
@@ -100,7 +101,12 @@ class Block(nn.Module):
             attn_drop=0.0,
             drop_path=0.0,
             act_layer=nn.GELU,
-            norm_layer=nn.LayerNorm):
+            norm_layer=nn.LayerNorm,
+            attention_out_bw=8,
+            softmax_bw=8,
+            mlp_out_bw=8,
+            norm2_in_bw=8,
+            att_block_out_bw=8):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.qact1 = QuantAct()
@@ -110,12 +116,14 @@ class Block(nn.Module):
             qkv_bias=qkv_bias,
             qk_scale=qk_scale,
             attn_drop=attn_drop,
-            proj_drop=drop
+            proj_drop=drop,
+            bitwidth_out=attention_out_bw,
+            bitwidth_softmax=softmax_bw,
         )
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(
             drop_path) if drop_path > 0.0 else nn.Identity()
-        self.qact2 = QuantAct(8)
+        self.qact2 = QuantAct(norm2_in_bw)
         self.norm2 = norm_layer(dim)
         self.qact3 = QuantAct()
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -123,9 +131,10 @@ class Block(nn.Module):
             in_features=dim,
             hidden_features=mlp_hidden_dim,
             act_layer=act_layer,
-            drop=drop
+            drop=drop,
+            bitwidth_out=mlp_out_bw,
         )
-        self.qact4 = QuantAct(8)
+        self.qact4 = QuantAct(att_block_out_bw)
 
     def forward(self, x_1, act_scaling_factor_1):
         x, act_scaling_factor = self.norm1(x_1, act_scaling_factor_1)
@@ -165,7 +174,14 @@ class VisionTransformer(nn.Module):
             drop_rate=0.0,
             attn_drop_rate=0.0,
             drop_path_rate=0.0,
-            norm_layer=None):
+            norm_layer=None,
+            patch_embed_bw=8,
+            pos_encoding_bw=8,
+            attention_out_bw=8,
+            softmax_bw=8,
+            mlp_out_bw=8,
+            norm2_in_bw=8,
+            att_block_out_bw=8):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = (
@@ -179,7 +195,8 @@ class VisionTransformer(nn.Module):
             img_size=img_size,
             patch_size=patch_size,
             in_chans=in_chans,
-            embed_dim=embed_dim
+            embed_dim=embed_dim,
+            bitwidth_out=patch_embed_bw,
         )
         num_patches = self.patch_embed.num_patches
 
@@ -189,8 +206,8 @@ class VisionTransformer(nn.Module):
 
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        self.qact_pos = QuantAct(8)
-        self.qact1 = QuantAct(8)
+        self.qact_pos = QuantAct(pos_encoding_bw)
+        self.qact1 = QuantAct(pos_encoding_bw)
 
         dpr = [
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
@@ -207,7 +224,12 @@ class VisionTransformer(nn.Module):
                     attn_drop=attn_drop_rate,
                     drop_path=dpr[i],
                     act_layer=IntGELU,
-                    norm_layer=norm_layer
+                    norm_layer=norm_layer,
+                    attention_out_bw=attention_out_bw,
+                    softmax_bw=softmax_bw,
+                    mlp_out_bw=mlp_out_bw,
+                    norm2_in_bw=norm2_in_bw,
+                    att_block_out_bw=att_block_out_bw
                 )
                 for i in range(depth)
             ]

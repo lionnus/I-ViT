@@ -120,7 +120,8 @@ class Mlp(nn.Module):
             hidden_features=None,
             out_features=None,
             act_layer=IntGELU,
-            drop=0.0):
+            drop=0.0,
+            bitwidth_out=8):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -129,17 +130,17 @@ class Mlp(nn.Module):
             in_features,
             hidden_features
         )
+        self.qact_gelu = QuantAct()
         self.act = act_layer()
         self.qact1 = QuantAct()
-        # self.fc2 = nn.Linear(hidden_features, out_features)
+        #dropout layer
         self.fc2 = QuantLinear(
             hidden_features,
             out_features
         )
-        self.qact2 = QuantAct(8)
+        self.qact2 = QuantAct(bitwidth_out)
         self.drop = nn.Dropout(drop)
 
-        self.qact_gelu = QuantAct()
 
     def forward(self, x, act_scaling_factor):
         x, act_scaling_factor = self.fc1(x, act_scaling_factor)
@@ -156,7 +157,13 @@ class Mlp(nn.Module):
 class PatchEmbed(nn.Module):
     """Image to Patch Embedding"""
 
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, norm_layer=None):
+    def __init__(self, 
+                 img_size=224, 
+                 patch_size=16, 
+                 in_chans=3, 
+                 embed_dim=768, 
+                 norm_layer=None,
+                 bitwidth_out=8):
         super().__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
@@ -178,7 +185,7 @@ class PatchEmbed(nn.Module):
         if self.norm_layer:
             self.qact_before_norm = QuantAct()
             self.norm = norm_layer(embed_dim)
-        self.qact = QuantAct(8)
+        self.qact = QuantAct(bitwidth_out)
 
 
     def forward(self, x, act_scaling_factor):

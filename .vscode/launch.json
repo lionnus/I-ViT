@@ -14,7 +14,7 @@
                 "--batch-size",
                 "64",
                 "--device",
-                "cuda:1",
+                "cuda:2",
                 "--epochs",
                 "90",
                 "--model",
@@ -22,7 +22,9 @@
                 "--data",
                 "/scratch2/ml_datasets/ILSVRC2012",
                 "--lr",
-                "1e-6"
+                "1e-6",
+                "--quant-bitwidths",
+                "8","8","8","8","8","8","8", // patchembed, pos enc, attention out, softmax out, mlp out, norm 2 in, attention block out
             ],
             "justMyCode": false,
             "python": "${workspaceFolder}/myenv/bin/python"

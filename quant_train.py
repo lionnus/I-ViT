@@ -137,6 +137,17 @@ parser.add_argument('--mixup-mode', type=str, default='batch',
 
 parser.add_argument('--best-acc1', type=float, default=0, help='best_acc1')
 
+# Quantization control params
+parser.add_argument(
+    '--quant-bitwidths',
+    type=int,
+    nargs=7,
+    metavar=('PATCHEMB','POSENC','ATTOUT','SOFTMAX','MLPOUT','NORM2IN','ATTBLKOUT'),
+    default=[8, 8, 8, 8, 8, 8, 8],
+    help='bit-widths for [patch_embed, pos_encoding, attention_out, softmax, mlp_out, norm2_in, att_block_out]'
+)
+
+
 
 def str2model(name):
     d = {'deit_tiny': deit_tiny_patch16_224,
@@ -182,12 +193,32 @@ def main():
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
+    # Unpack model config
+    (
+        patch_embed_bw,
+        pos_encoding_bw,
+        attention_out_bw,
+        softmax_bw,
+        mlp_out_bw,
+        norm2_in_bw,
+        att_block_out_bw
+    ) = args.quant_bitwidths
 
     # Model
-    model = str2model(args.model)(pretrained=True,
-                                  num_classes=args.nb_classes,
-                                  drop_rate=args.drop,
-                                  drop_path_rate=args.drop_path)
+    model = str2model(args.model)(
+        pretrained=True,
+        num_classes=args.nb_classes,
+        drop_rate=args.drop,
+        drop_path_rate=args.drop_path,
+        patch_embed_bw=patch_embed_bw,
+        pos_encoding_bw=pos_encoding_bw,
+        attention_out_bw=attention_out_bw,
+        softmax_bw=softmax_bw,
+        mlp_out_bw=mlp_out_bw,
+        norm2_in_bw=norm2_in_bw,
+        att_block_out_bw=att_block_out_bw,
+    )
+
     model.to(device)
 
     model_ema = None
