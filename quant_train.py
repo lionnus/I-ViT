@@ -146,23 +146,20 @@ parser.add_argument(
     default=[8, 8, 8, 8, 8, 8, 8],
     help='bit-widths for [patch_embed, pos_encoding, attention_out, softmax, mlp_out, norm2_in, att_block_out]'
 )
-parser.add_argument('--gelu',      default='ivit',  choices=['float','ivit','ibert'],
+parser.add_argument('--gelu',      default='ibert',  choices=['float','ivit','ibert'],
                     help='GELU implementation to use')
-parser.add_argument('--softmax',   default='ivit',  choices=['float','ivit','ibert'],
+parser.add_argument('--softmax',   default='ibert',  choices=['float','ivit','ibert'],
                     help='Softmax implementation to use')
-parser.add_argument('--layernorm', default='ivit',  choices=['float','ivit','ibert'],
+parser.add_argument('--layernorm', default='ibert',  choices=['float','ivit','ibert'],
                     help='LayerNorm implementation to use')
-
-
-
 
 def str2model(name):
     d = {'deit_tiny': deit_tiny_patch16_224,
          'deit_small': deit_small_patch16_224,
          'deit_base': deit_base_patch16_224,
-         'swin_tiny': swin_tiny_patch4_window7_224,
-         'swin_small': swin_small_patch4_window7_224,
-         'swin_base': swin_base_patch4_window7_224,
+        #  'swin_tiny': swin_tiny_patch4_window7_224,
+        #  'swin_small': swin_small_patch4_window7_224,
+        #  'swin_base': swin_base_patch4_window7_224,
          }
     print('Model: %s' % d[name].__name__)
     return d[name]

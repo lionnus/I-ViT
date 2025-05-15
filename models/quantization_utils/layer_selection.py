@@ -12,9 +12,9 @@ GELU_REGISTRY = {
 
 # ---- Softmax ---------------------------------------------------------
 SOFTMAX_REGISTRY = {
-    "float":  lambda bw: nn.Softmax(dim=-1),
-    "ivit":   lambda bw: IVITIntSoftmax(bw),
-    "ibert":  lambda bw: IBERTIntSoftmax(bw),
+    "float": nn.Softmax,
+    "ivit":  IVITIntSoftmax,
+    "ibert": IBERTIntSoftmax,
 }
 
 # ---- LayerNorm -------------------------------------------------------
@@ -27,8 +27,8 @@ LN_REGISTRY = {
 def get_gelu(name: str):
     return GELU_REGISTRY[name.lower()]
 
-def get_softmax(name: str, bw: int):
-    return SOFTMAX_REGISTRY[name.lower()](bw)
+def get_softmax(name: str):
+    return SOFTMAX_REGISTRY[name.lower()]
 
 def get_layernorm(name: str):
     return LN_REGISTRY[name.lower()]

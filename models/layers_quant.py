@@ -7,7 +7,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .quantization_utils import QuantLinear, QuantAct, QuantConv2d, IntGELU
+from .quantization_utils import QuantLinear, QuantAct, QuantConv2d
 
 
 def _ntuple(n):
@@ -117,9 +117,9 @@ class Mlp(nn.Module):
     def __init__(
             self,
             in_features,
+            act_layer,
             hidden_features=None,
             out_features=None,
-            act_layer=IntGELU,
             drop=0.0,
             bitwidth_out=8):
         super().__init__()
