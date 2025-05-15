@@ -146,6 +146,13 @@ parser.add_argument(
     default=[8, 8, 8, 8, 8, 8, 8],
     help='bit-widths for [patch_embed, pos_encoding, attention_out, softmax, mlp_out, norm2_in, att_block_out]'
 )
+parser.add_argument('--gelu',      default='ivit',  choices=['float','ivit','ibert'],
+                    help='GELU implementation to use')
+parser.add_argument('--softmax',   default='ivit',  choices=['float','ivit','ibert'],
+                    help='Softmax implementation to use')
+parser.add_argument('--layernorm', default='ivit',  choices=['float','ivit','ibert'],
+                    help='LayerNorm implementation to use')
+
 
 
 
@@ -217,6 +224,9 @@ def main():
         mlp_out_bw=mlp_out_bw,
         norm2_in_bw=norm2_in_bw,
         att_block_out_bw=att_block_out_bw,
+        gelu_type=args.gelu,
+        softmax_type=args.softmax,
+        layernorm_type=args.layernorm
     )
 
     model.to(device)

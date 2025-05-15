@@ -12,7 +12,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from .layers_quant import PatchEmbed, Mlp, DropPath, trunc_normal_
-from .quantization_utils import QuantLinear, QuantAct, QuantConv2d, IntLayerNorm, IntSoftmax, IntGELU, QuantMatMul
+from .quantization_utils import QuantLinear, QuantAct, QuantConv2d, QuantMatMul
+from .layer_selection import get_gelu, get_softmax, get_layernorm
 from .utils import load_weights_from_npz
 
 
@@ -181,7 +182,10 @@ class VisionTransformer(nn.Module):
             softmax_bw=8,
             mlp_out_bw=8,
             norm2_in_bw=8,
-            att_block_out_bw=8):
+            att_block_out_bw=8,
+            gelu_type='ivit',
+            softmax_type='ivit',
+            layernorm_type='ivit'):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = (
