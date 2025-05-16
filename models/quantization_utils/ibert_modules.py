@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from .quant_utils import *
 from .quant_modules import QuantAct
+import logging
 
 class IBERTIntLayerNorm(nn.Module):
     """
@@ -34,7 +35,7 @@ class IBERTIntLayerNorm(nn.Module):
         super(IBERTIntLayerNorm, self).__init__()
         self.quant_mode = quant_mode
         if force_dequant in ['nonlinear', 'layernorm']:
-            print("Force dequantize layernorm")
+            logging.log("Force dequantize layernorm")
             self.quant_mode = 'none'
         self.overflow_handling = overflow_handling
         self.register_buffer('shift', torch.zeros(1))
@@ -70,7 +71,7 @@ class IBERTIntLayerNorm(nn.Module):
             shift = (torch.log2(torch.sqrt(var_int / 2**32)).ceil()).max()
             shift_old = self.shift
             self.shift = torch.max(self.shift, shift)
-            print("Dynamic shift adjustment: {} -> {}".format(
+            logging.log("Dynamic shift adjustment: {} -> {}".format(
                 int(shift_old), int(self.shift)))
 
     def overflow_fallback(self, y_int):
@@ -145,7 +146,7 @@ class IBERTIntGELU(nn.Module):
         self.register_buffer('input_scaling_factor', torch.ones(1))
         self.quant_mode = quant_mode
         if force_dequant in ['nonlinear', 'gelu']:
-            print("Force dequantize gelu")
+            logging.log("Force dequantize gelu")
             self.quant_mode = 'none'
 
 
@@ -224,11 +225,11 @@ class IBERTIntSoftmax(nn.Module):
         self.output_bit = output_bit
         self.quant_mode = quant_mode
         if force_dequant in ['nonlinear', 'softmax']:
-            print("Force dequantize softmax")
+            logging.log("Force dequantize softmax")
             self.quant_mode = 'none'
 
 
-        self.act = QuantAct(16, quant_mode=self.quant_mode)
+        self.act = QuantAct(16, quant_mode=self.quant_mode) # TODO: change 16bit(internal, might not be needed)
         self.x0 = -0.6931 # -ln2
         self.n = 30 # sufficiently large integer
         self.coef = [0.35815147, 0.96963238, 1.] # ax**2 + bx + c

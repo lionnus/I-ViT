@@ -273,9 +273,9 @@ def main():
     # Weights & Biases init
     if not args.no_wandb:
         wandb.init(
-            project=args.wandb-project,
-            entity=args.wandb-entity,
-            name=args.wandb-run-name,
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
             config=vars(args)
         )
         # Explicitly store bit-widths and layer types for easy filtering
@@ -356,7 +356,7 @@ def main():
         acc1 = validate(args, val_loader, model, criterion_v, device)
 
         #  WandB logging per epoch
-        if not args.no-wandb:
+        if not args.no_wandb:
             wandb.log({
                 'epoch': epoch,
                 'train_loss_epoch': train_loss,
@@ -424,7 +424,7 @@ def train(args, train_loader, model, criterion, optimizer, epoch, loss_scaler, m
         if i % args.print_freq == 0:
             progress.display(i)
             # WandB logging per iteration
-            if not args.no-wandb:
+            if not args.no_wandb:
                 wandb.log({
                     'iter': i + epoch * len(train_loader),
                     'train_loss': losses.val,
