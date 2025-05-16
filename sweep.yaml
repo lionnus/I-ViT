@@ -1,0 +1,23 @@
+method: grid
+metric:
+  name: val_acc1
+  goal: maximize
+
+parameters:
+  layer_type:
+    values: ["ivit", "ibert"]
+  bitwidth:
+    values: [8]
+
+program: quant_train.py
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --model=deit_tiny
+  - --data=/scratch2/ml_datasets/ILSVRC2012
+  - --epochs=1
+  - --lr=5e-7
+  - --device=cuda:0
+  - --batch-size=64
+  - ${args}
