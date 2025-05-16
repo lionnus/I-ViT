@@ -19,6 +19,7 @@ from timm.utils import NativeScaler, get_state_dict, ModelEma, accuracy
 from models import *
 from utils import *
 
+import wandb
 
 parser = argparse.ArgumentParser(description="I-ViT")
 
@@ -139,12 +140,11 @@ parser.add_argument('--best-acc1', type=float, default=0, help='best_acc1')
 
 # Quantization control params
 parser.add_argument(
-    '--quant-bitwidths',
-    type=int,
-    nargs=7,
-    metavar=('PATCHEMB','POSENC','ATTOUT','SOFTMAX','MLPOUT','NORM2IN','ATTBLKOUT'),
-    default=[8, 8, 8, 8, 8, 8, 8],
-    help='bit-widths for [patch_embed, pos_encoding, attention_out, softmax, mlp_out, norm2_in, att_block_out]'
+    '--bitwidth',                # NEW helper
+    default=None,
+    type=str,                    # accept "8"  OR  "8,8,8,8,8,8,8"
+    help='Single bit-width or comma-separated list of 7 bit-widths for the respective locations: \
+    patchembed, pos enc, attention out, softmax out, mlp out, norm 2 in, attention block out.'
 )
 parser.add_argument('--gelu',      default='ibert',  choices=['float','ivit','ibert'],
                     help='GELU implementation to use')
@@ -152,6 +152,24 @@ parser.add_argument('--softmax',   default='ibert',  choices=['float','ivit','ib
                     help='Softmax implementation to use')
 parser.add_argument('--layernorm', default='ibert',  choices=['float','ivit','ibert'],
                     help='LayerNorm implementation to use')
+# Alternative to set all three at once
+parser.add_argument(
+    '--layer_type',
+    choices=['ivit','ibert'],
+    default=None,
+    help='If set, use this implementation for GELU, Softmax, and LayerNorm. Overrides --gelu, --softmax, and --layernorm.'
+)
+
+
+# Weights & Biases logging
+parser.add_argument('--wandb-project', type=str, default='i-vit',
+                    help='Weights & Biases project name')
+parser.add_argument('--wandb-entity', type=str, default=None,
+                    help='Weights & Biases entity (username or team)')
+parser.add_argument('--wandb-run-name', type=str, default=None,
+                    help='Custom run name for Weights & Biases')
+parser.add_argument('--no-wandb', action='store_true',
+                    help='Disable Weights & Biases logging')
 
 def str2model(name):
     d = {'deit_tiny': deit_tiny_patch16_224,
@@ -197,7 +215,15 @@ def main():
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
-    # Unpack model config
+    # Unpack model config for bitwidths
+    if args.bitwidth is not None:
+        # turn "8,8,8,8,8,8,8"  →  [8,8,8,8,8,8,8]
+        bw_list = [int(x) for x in args.bitwidth.replace(',', ' ').split()]
+        if len(bw_list) == 1:
+            bw_list *= 7
+        if len(bw_list) != 7:
+            raise ValueError('--bitwidth must be 1 or 7 values')
+        args.quant_bitwidths = bw_list
     (
         patch_embed_bw,
         pos_encoding_bw,
@@ -207,6 +233,11 @@ def main():
         norm2_in_bw,
         att_block_out_bw
     ) = args.quant_bitwidths
+    # if the helper is set, override all three
+    if args.layer_type is not None:
+        args.gelu      = args.layer_type
+        args.softmax   = args.layer_type
+        args.layernorm = args.layer_type
 
     # Model
     model = str2model(args.model)(
@@ -227,6 +258,29 @@ def main():
     )
 
     model.to(device)
+
+    # Weights & Biases init
+    if not args.no_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            config=vars(args)
+        )
+        # Explicitly store bit-widths and layer types for easy filtering
+        wandb.config.update({
+            'patch_embed_bw': patch_embed_bw,
+            'pos_encoding_bw': pos_encoding_bw,
+            'attention_out_bw': attention_out_bw,
+            'softmax_bw': softmax_bw,
+            'mlp_out_bw': mlp_out_bw,
+            'norm2_in_bw': norm2_in_bw,
+            'att_block_out_bw': att_block_out_bw,
+            'gelu_type': args.gelu,
+            'softmax_type': args.softmax,
+            'layernorm_type': args.layernorm
+        }, allow_val_change=True)
+        wandb.watch(model, log='gradients', log_freq=100)
 
     model_ema = None
     if args.model_ema:
@@ -272,7 +326,7 @@ def main():
     best_epoch = 0
     for epoch in range(args.start_epoch, args.epochs):
         # train for one epoch
-        train(args, train_loader, model, criterion, optimizer, epoch,
+        train_loss = train(args, train_loader, model, criterion, optimizer, epoch,
               loss_scaler, args.clip_grad, model_ema, mixup_fn, device)
         lr_scheduler.step(epoch)
 
@@ -289,6 +343,15 @@ def main():
         #     }, checkpoint_path)
 
         acc1 = validate(args, val_loader, model, criterion_v, device)
+
+        #  WandB logging per epoch
+        if not args.no_wandb:
+            wandb.log({
+                'epoch': epoch,
+                'train_loss_epoch': train_loss,
+                'val_acc1': acc1,
+                'lr': optimizer.param_groups[0]['lr']
+            })
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > args.best_acc1
@@ -347,6 +410,16 @@ def train(args, train_loader, model, criterion, optimizer, epoch, loss_scaler, m
 
         if i % args.print_freq == 0:
             progress.display(i)
+            # WandB logging per iteration
+            if not args.no_wandb:
+                wandb.log({
+                    'iter': i + epoch * len(train_loader),
+                    'train_loss': losses.val,
+                    'epoch': epoch
+                })
+
+    # return avg loss for epoch 
+    return losses.avg
 
 
 def validate(args, val_loader, model, criterion, device):

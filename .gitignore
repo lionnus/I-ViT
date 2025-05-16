@@ -1,3 +1,4 @@
 *myenv*
 *cache*
 *.log
+wandb*
