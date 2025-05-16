@@ -1,8 +1,13 @@
+# quant_train.py
+# Adapted from github.com/zkkli/I-ViT
+# Extended by Lionnus Kesting (lkesting@ethz.ch)
+
 import argparse
 import os
 import time
 import math
 import logging
+import uuid
 import numpy as np
 
 import torch
@@ -160,7 +165,6 @@ parser.add_argument(
     help='If set, use this implementation for GELU, Softmax, and LayerNorm. Overrides --gelu, --softmax, and --layernorm.'
 )
 
-
 # Weights & Biases logging
 parser.add_argument('--wandb-project', type=str, default='i-vit',
                     help='Weights & Biases project name')
@@ -186,6 +190,10 @@ def str2model(name):
 def main():
     args = parser.parse_args()
 
+    # generate a unique identifier for this run
+    run_id = uuid.uuid4().hex
+    args.run_id = run_id
+
     seed = args.seed
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -197,10 +205,13 @@ def main():
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
+    # log to a unique file per run
     logging.basicConfig(format='%(asctime)s - %(message)s',
-                        datefmt='%d-%b-%y %H:%M:%S', filename=args.output_dir + 'log.log')
+                        datefmt='%d-%b-%y %H:%M:%S',
+                        filename=os.path.join(args.output_dir, f'log_{run_id}.log'))
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger().addHandler(logging.StreamHandler())
+    logging.info(f'Run ID: {run_id}')
     logging.info(args)
 
     device = torch.device(args.device)
@@ -262,9 +273,9 @@ def main():
     # Weights & Biases init
     if not args.no_wandb:
         wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.wandb_run_name,
+            project=args.wandb-project,
+            entity=args.wandb-entity,
+            name=args.wandb-run-name,
             config=vars(args)
         )
         # Explicitly store bit-widths and layer types for easy filtering
@@ -345,7 +356,7 @@ def main():
         acc1 = validate(args, val_loader, model, criterion_v, device)
 
         #  WandB logging per epoch
-        if not args.no_wandb:
+        if not args.no-wandb:
             wandb.log({
                 'epoch': epoch,
                 'train_loss_epoch': train_loss,
@@ -359,7 +370,9 @@ def main():
         if is_best:
             # record the best epoch
             best_epoch = epoch
-            torch.save(model.state_dict(), os.path.join(args.output_dir, 'checkpoint.pth.tar'))
+            # save checkpoint with unique run_id
+            ckpt_path = os.path.join(args.output_dir, f'checkpoint_{run_id}.pth.tar')
+            torch.save(model.state_dict(), ckpt_path)
         logging.info(f'Acc at epoch {epoch}: {acc1}')
         logging.info(f'Best acc at epoch {best_epoch}: {args.best_acc1}')
 
@@ -411,7 +424,7 @@ def train(args, train_loader, model, criterion, optimizer, epoch, loss_scaler, m
         if i % args.print_freq == 0:
             progress.display(i)
             # WandB logging per iteration
-            if not args.no_wandb:
+            if not args.no-wandb:
                 wandb.log({
                     'iter': i + epoch * len(train_loader),
                     'train_loss': losses.val,
