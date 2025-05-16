@@ -7,6 +7,7 @@ from fractions import Fraction
 import decimal
 from decimal import Decimal
 import time
+import torch.nn.functional as F
 
 
 def linear_quantize(input, scale, zero_point, is_weight):
@@ -258,3 +259,9 @@ class fixedpoint_mul(Function):
             identity_grad = grad_output.clone() / ctx.z_scaling_factor
         return grad_output.clone() / ctx.z_scaling_factor, None, None, None, None, \
                identity_grad, None
+
+def softmax(x, dim: int, onnx_trace: bool = False):
+    if onnx_trace:
+        return F.softmax(x.float(), dim=dim)
+    else:
+        return F.softmax(x, dim=dim, dtype=torch.float32)

@@ -40,6 +40,12 @@ def _collect_io_stats(module, inputs, output, module_name):
         rec = {
             "layer":       module_name,
             "type":        module.__class__.__name__,
+            "min_in":    xs.min().item()  if xs is not None else None,
+            "max_in":    xs.max().item()  if xs is not None else None,
+            "min_out":   ys.min().item()  if ys is not None else None,
+            "max_out":   ys.max().item()  if ys is not None else None,
+            "scale_in":  scale_x.item() if scale_x is not None else None,
+            "scale_out": scale_y.item() if scale_y is not None else None,
             "min_in_int":  xs_int.min().item()  if xs_int is not None else None,
             "max_in_int":  xs_int.max().item()  if xs_int is not None else None,
             "min_out_int": ys_int.min().item()  if ys_int is not None else None,
@@ -157,41 +163,52 @@ class QuantLinear(nn.Linear):
         pass
 
     def forward(self, x, prev_act_scaling_factor=None):
-        with torch.no_grad():
-            w = self.weight
-            if self.per_channel:
-                v = w.reshape(w.shape[0], -1)
-                cur_min = v.min(axis=1).values
-                cur_max = v.max(axis=1).values
-                self.min_val = cur_min
-                self.max_val = cur_max
-            else:
-                raise Exception('For weight, we only support per_channel quantization.')
+        """
+        using quantized weights to forward activation x
+        """
+        if self.quant_mode == 'none':
+            return F.linear(x, weight=self.weight, bias=self.bias), None
 
-            self.fc_scaling_factor = symmetric_linear_quantization_params(
-                self.weight_bit, self.min_val, self.max_val)
+    	# x / prev_act_scaling_factor = int
+        assert self.quant_mode == 'symmetric', \
+                "unsupported quant mode: {}".format(quant_mode)
 
+        # assert that prev_act_scaling_factor is a scalar tensor
+        # e.g. all input tensors have the same scalar factor
+        assert prev_act_scaling_factor is not None and \
+              prev_act_scaling_factor.shape == (1,) 
+
+        w = self.weight
+        w_transform = w.data.detach()
+        if self.per_channel:
+            w_min, _ = torch.min(w_transform, dim=1, out=None)
+            w_max, _ = torch.max(w_transform, dim=1, out=None)
+        else:
+            w_min = w_transform.min().expand(1)
+            w_max = w_transform.max().expand(1)
+
+        self.fc_scaling_factor = symmetric_linear_quantization_params(
+                self.weight_bit, w_min, w_max)
         self.weight_integer = self.weight_function(
-            self.weight, self.weight_bit, self.fc_scaling_factor, True)
+                self.weight, self.weight_bit, 
+                self.fc_scaling_factor, True)
 
         bias_scaling_factor = self.fc_scaling_factor * prev_act_scaling_factor
 
-        if self.bias is not None:
-            self.bias_integer = self.weight_function(
-                self.bias, self.bias_bit, bias_scaling_factor, True)
-        else:
-            self.bias_integer = None
+        self.bias_integer = self.weight_function(self.bias, 
+                self.bias_bit, bias_scaling_factor, True)
 
         prev_act_scaling_factor = prev_act_scaling_factor.view(1, -1)
         x_int = x / prev_act_scaling_factor
 
         return F.linear(x_int, weight=self.weight_integer, bias=self.bias_integer) \
-               * bias_scaling_factor, bias_scaling_factor
+                * bias_scaling_factor, bias_scaling_factor
 
 
 class QuantAct(nn.Module):
     """
     Class to quantize given activations
+
     Parameters:
     ----------
     activation_bit : int
@@ -204,15 +221,15 @@ class QuantAct(nn.Module):
         Whether to use channel-wise quantization.
     channel_len : int, default None
         Specify the channel length when using the per_channel mode.
-    quant_mode : 'none' or 'asymmetric', default 'none'
+    quant_mode : 'none' or 'symmetric', default 'symmetric'
         The mode for quantization. 'none' for no quantization.
     """
-
     def __init__(self,
                  activation_bit=8,
                  act_range_momentum=0.95,
                  running_stat=True,
                  per_channel=False,
+                 channel_len=None,
                  quant_mode="symmetric"):
         super(QuantAct, self).__init__()
 
@@ -220,16 +237,24 @@ class QuantAct(nn.Module):
         self.act_range_momentum = act_range_momentum
         self.running_stat = running_stat
         self.quant_mode = quant_mode
-        self.per_channel = per_channel
+        self.percentile = False
 
-        self.min_val = torch.zeros(1)
-        self.max_val = torch.zeros(1)
-        self.register_buffer('act_scaling_factor', torch.zeros(1))
+        if not per_channel:
+            self.register_buffer('x_min', torch.zeros(1))
+            self.register_buffer('x_max', torch.zeros(1))
+            self.register_buffer('act_scaling_factor', torch.zeros(1))
+        else:
+            assert channel_len is not None
+            self.register_buffer('x_min', torch.zeros(channel_len))
+            self.register_buffer('x_max', torch.zeros(channel_len))
+            self.register_buffer('act_scaling_factor', torch.zeros(channel_len))
 
         self.quant_mode = quant_mode
         self.per_channel = per_channel
 
-        if self.quant_mode == "symmetric":
+        if self.quant_mode == "none":
+            self.act_function = None
+        elif self.quant_mode == "symmetric":
             self.act_function = SymmetricQuantFunction.apply
         elif self.quant_mode == "asymmetric":
             raise NotImplementedError("unsupported quant mode: {}".format(self.quant_mode))
@@ -241,57 +266,75 @@ class QuantAct(nn.Module):
                "quant_mode: {2}, Act_min: {3:.2f}, " \
                "Act_max: {4:.2f})".format(self.__class__.__name__, self.activation_bit,
                                           self.quant_mode, self.x_min.item(), self.x_max.item())
-
     def fix(self):
         """
         fix the activation range by setting running stat
         """
         self.running_stat = False
-
+        
     def unfix(self):
         """
         unfix the activation range by setting running stat
         """
         self.running_stat = True
 
-    def forward(self, x,
-                pre_act_scaling_factor=None,
-                identity=None,
-                identity_scaling_factor=None):
+    def forward(self, x, 
+                pre_act_scaling_factor=None, 
+                identity=None, 
+                identity_scaling_factor=None,
+                specified_min=None,
+                specified_max=None):
         # collect runnng stats
-        with torch.no_grad():
-            x_act = x if identity is None else identity + x
-            if self.running_stat:
-                if len(x_act.shape) == 4:
-                    x_act = x_act.permute(0, 2, 3, 1)
-                v = x_act.reshape(-1, x_act.shape[-1])
-                v = v.transpose(0, 1)
-
-                cur_min = v.min(axis=1).values
-                cur_max = v.max(axis=1).values
-                if torch.eq(self.min_val, self.max_val).all():
-                    self.min_val = cur_min
-                    self.max_val = cur_max
+        x_act = x if identity is None else identity + x
+        if self.running_stat:
+            if not self.percentile:
+                if not self.per_channel:
+                    x_min = x_act.data.min()
+                    x_max = x_act.data.max()
                 else:
-                    self.min_val = self.min_val * self.act_range_momentum + \
-                                 cur_min * (1 - self.act_range_momentum)
-                    self.max_val = self.max_val * self.act_range_momentum + \
-                                   cur_max * (1 - self.act_range_momentum)
-                self.max_val = self.max_val.max()
-                self.min_val = self.min_val.min()
+                    x_min = x_act.data.min(axis=0).values.min(axis=0).values
+                    x_max = x_act.data.max(axis=0).values.max(axis=0).values
+            else:
+                raise NotImplementedError("percentile mode is not currently supported.")
 
-            self.act_scaling_factor = symmetric_linear_quantization_params(
-                self.activation_bit, self.min_val, self.max_val)
+            # Initialization
+            if torch.eq(self.x_min, self.x_max).all():
+                self.x_min = self.x_min + x_min
+                self.x_max = self.x_max + x_max
+
+            # exponential moving average (EMA)
+            # use momentum to prevent the quantized values change greatly every iteration
+            elif self.act_range_momentum == -1:
+                self.x_min = torch.min(self.x_min, x_min)
+                self.x_max = torch.max(self.x_max, x_max)
+            else:
+                self.x_min = self.x_min * self.act_range_momentum +\
+                        x_min * (1 - self.act_range_momentum)
+                self.x_max = self.x_max * self.act_range_momentum +\
+                        x_max * (1 - self.act_range_momentum)
+
+        if self.quant_mode == 'none':
+            return x_act, None
+
+        assert self.quant_mode == 'symmetric', \
+                "unsupported quant mode: {}".format(quant_mode)
+        
+        x_min = self.x_min if specified_min is None else specified_min
+        x_max = self.x_max if specified_max is None else specified_max
+
+        self.act_scaling_factor = symmetric_linear_quantization_params(
+            self.activation_bit, x_min, x_max)
 
         if pre_act_scaling_factor is None:
-            # this is for the input quantization
-            quant_act_int = self.act_function(x, self.activation_bit, self.act_scaling_factor, False)
+            # this is for the input quantization 
+            quant_act_int = self.act_function(x, self.activation_bit, \
+                    self.act_scaling_factor, False)
         else:
             quant_act_int = fixedpoint_mul.apply(
-                x, pre_act_scaling_factor,
-                self.activation_bit, self.quant_mode,
-                self.act_scaling_factor,
-                identity, identity_scaling_factor)
+                    x, pre_act_scaling_factor, 
+                    self.activation_bit, self.quant_mode, 
+                    self.act_scaling_factor, 
+                    identity, identity_scaling_factor)
 
         correct_output_scale = self.act_scaling_factor.view(-1)
 
@@ -421,175 +464,3 @@ class QuantConv2d(nn.Conv2d):
 
         return (F.conv2d(x_int, self.weight_integer, self.bias_integer, self.stride, self.padding,
                          self.dilation, self.groups) * correct_output_scale, correct_output_scale)
-
-
-class IntLayerNorm(nn.LayerNorm):
-    """
-    Implementation of I-LayerNorm
-    Class to quantize given LayerNorm layer
-    """
-    def __init__(self, 
-                normalized_shape, 
-                eps=1e-5,
-                elementwise_affine=True):
-        super(IntLayerNorm, self).__init__(normalized_shape, eps, elementwise_affine)
-        self.dim_sqrt = None
-        self.register_buffer('norm_scaling_factor', torch.zeros(normalized_shape))
-        self.register_buffer('bias_integer', torch.zeros_like(self.bias))
-
-    def fix(self):
-        pass
-
-    def unfix(self):
-        pass
-
-    def forward(self, x, scaling_factor=None):
-        if self.dim_sqrt is None:
-            n = torch.tensor(x.shape[2], dtype=torch.float)
-            self.dim_sqrt = torch.sqrt(n).cuda(device=x.device)
-
-        # Normalization: computes mean and variance(std)
-        x_int = x / scaling_factor
-        mean_int = round_ste.apply(x_int.mean(axis=2, keepdim=True))
-        x_int = x_int.to(dtype=torch.int32)
-        mean_int = mean_int.to(dtype=torch.int32)
-        y_int = x_int - mean_int
-        y_sq_int = y_int ** 2
-        var_int = torch.sum(y_sq_int, axis=2, keepdim=True)
-
-        # Integer Iteration
-        k = 2 ** 16
-        for _ in range(10):
-            k_1 = floor_ste.apply((k + floor_ste.apply(var_int/k))/2)
-            k = k_1
-        std_int = k
-
-        factor = floor_ste.apply((2 ** 31-1) / std_int)
-        y_int = floor_ste.apply(y_int * factor / 2)
-        scaling_factor = self.dim_sqrt / 2 ** 30
-
-        # scaling and shifting
-        bias = self.bias.data.detach() / (self.weight.data.detach())
-        bias_int = floor_ste.apply(bias / scaling_factor)
-
-        self.bias_integer = bias_int
-
-        y_int = y_int + bias_int
-        scaling_factor = scaling_factor * self.weight
-        x = y_int * scaling_factor
-        self.norm_scaling_factor = scaling_factor
-        return x, scaling_factor
-
-
-class IntGELU(nn.Module):
-    """
-    Implementation of ShiftGELU
-    Class to quantize given GELU layer
-    """
-
-    def __init__(self, output_bit=8):
-        super(IntGELU, self).__init__()
-        self.output_bit = output_bit
-
-        self.n = 23  # sufficiently large integer
-        #The minimum value for ensuring accuracy (varies depending on models)
-
-        self.register_buffer('act_scaling_factor', torch.zeros(1))
-
-    def fix(self):
-        pass
-
-    def unfix(self):
-        pass
-
-    def int_exp_shift(self, x_int, scaling_factor):
-        x_int = x_int.to(dtype=torch.int32)
-        x_int = x_int + floor_ste.apply(x_int / 2) - floor_ste.apply(x_int / 2 ** 4)
-
-        with torch.no_grad():
-            x0_int = torch.floor(-1.0 / scaling_factor)
-        x_int = torch.max(x_int, self.n * x0_int)
-
-        q = floor_ste.apply(x_int / x0_int)
-        r = x_int - x0_int * q
-        exp_int = r/2 - x0_int
-        exp_int = torch.clamp(floor_ste.apply(exp_int * 2 ** (self.n - q)), min=0)
-        scaling_factor = scaling_factor / 2 ** self.n
-
-        return exp_int, scaling_factor
-
-    def forward(self, x, scaling_factor=None):
-        pre_x_int = x / scaling_factor
-        pre_x_int = pre_x_int.to(dtype=torch.int32)
-        scaling_factor_sig = scaling_factor * 1.702
-
-        x_int_max, _ = pre_x_int.max(dim=-1, keepdim=True)
-        x_int = pre_x_int - x_int_max
-
-        exp_int, _ = self.int_exp_shift(x_int, scaling_factor_sig) # e^(x-x_max)
-
-        exp_int_max, _ = self.int_exp_shift(-x_int_max, scaling_factor_sig)  # e^(-x_max)
-        exp_int_sum = exp_int + exp_int_max
-
-        exp_int_sum.clamp_max_(2**31-1)
-        factor = floor_ste.apply((2 ** 31-1) / exp_int_sum)
-        sigmoid_int = floor_ste.apply(exp_int * factor / 2 ** (31-self.output_bit+1))
-        sigmoid_scaling_factor = torch.Tensor([1 / 2 ** (self.output_bit-1)]).cuda(device=x.device)
-
-        x_int = pre_x_int * sigmoid_int
-        scaling_factor = scaling_factor * sigmoid_scaling_factor
-        self.act_scaling_factor = scaling_factor
-        return x_int * scaling_factor, scaling_factor
-
-
-class IntSoftmax(nn.Module):
-    """
-    Implementation of Shiftmax
-    Class to quantize given Softmax layer
-    """
-
-    def __init__(self, output_bit=8):
-        super(IntSoftmax, self).__init__()
-        self.output_bit = output_bit
-
-        self.n = 15  # sufficiently large integer
-        #The minimum value for ensuring accuracy (varies depending on models)
-
-        self.register_buffer('act_scaling_factor', torch.zeros(1))
-
-    def fix(self):
-        pass
-
-    def unfix(self):
-        pass
-
-    def int_exp_shift(self, x_int, scaling_factor):
-        x_int = x_int + floor_ste.apply(x_int / 2) - floor_ste.apply(x_int / 2 ** 4)
-
-        with torch.no_grad():
-            x0_int = torch.floor(-1.0 / scaling_factor)
-        x_int = torch.max(x_int, self.n * x0_int)
-
-        q = floor_ste.apply(x_int / x0_int)
-        r = x_int - x0_int * q
-        exp_int = r/2 - x0_int
-        exp_int = torch.clamp(floor_ste.apply(exp_int * 2 ** (self.n - q)), min=0)
-        scaling_factor = scaling_factor / 2 ** self.n
-        return exp_int, scaling_factor
-
-    def forward(self, x, scaling_factor):
-        x_int = x / scaling_factor
-        x_int.to(dtype=torch.int32)
-        x_int_max, _ = x_int.max(dim=-1, keepdim=True)
-        x_int = x_int - x_int_max
-
-        exp_int, _ = self.int_exp_shift(x_int, scaling_factor)
-        exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
-
-        exp_int_sum.clamp_max_(2**31-1)
-        factor = floor_ste.apply((2**31-1) / exp_int_sum)
-        exp_int = floor_ste.apply(exp_int * factor / 2 ** (31-self.output_bit+1))
-        scaling_factor = torch.Tensor([1 / 2 ** (self.output_bit-1)]).cuda(device=x.device)
-
-        self.act_scaling_factor = scaling_factor
-        return exp_int * scaling_factor, scaling_factor

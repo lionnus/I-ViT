@@ -5,48 +5,147 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "inference.py single image",
+            "name": "quant_train.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "inference.py",
+            "program": "quant_train.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--batch-size",
+                "64",
+                "--device",
+                "cuda:2",
+                "--epochs",
+                "90",
+                "--model",
+                "deit_tiny",
+                "--data",
+                "/scratch2/ml_datasets/ILSVRC2012",
+                "--lr",
+                "1e-6",
+                "--quant-bitwidths",
+                "8","8","8","8","8","8","8", // patchembed, pos enc, attention out, softmax out, mlp out, norm 2 in, attention block out
+            ],
+            "justMyCode": false,
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
+            "name": "scripts/inference.py single image 8 bit",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.inference",
             "console": "integratedTerminal",
             "args": [
                 "--single-image",
                 "example.jpg",
                 "--device",
-                "cuda:0",
+                "cuda:2",
+                "--weights",
+                "results_deit-t_ivitbert_8bit/checkpoint.pth.tar"
+            ],
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
+            "name": "scripts/inference.py single image 16 bit",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.inference",
+            "console": "integratedTerminal",
+            "args": [
+                "--single-image",
+                "example.jpg",
+                "--device",
+                "cuda:2",
                 "--weights",
                 "results_deit-t_16bit/checkpoint.pth.tar"
             ],
             "python": "${workspaceFolder}/myenv/bin/python"
         },
         {
-            "name": "inference.py evaluate latest",
+            "name": "onnx_inference.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "inference.py",
+            "program": "scripts/onnx_inference.py",
             "console": "integratedTerminal",
             "args": [
                 "--batch-size",
                 "128",
                 "--device",
-                "cuda:0"
+                "cuda:1",
+                "--data-path",
+                "/scratch2/ml_datasets/ILSVRC2012",
+                "--onnx",
+                "${input:onnxModel}"
             ],
             "python": "${workspaceFolder}/myenv/bin/python"
         },
         {
-            "name": "inference.py evaluate 16bit",
+            "name": "scripts/inference.py evaluate latest",
             "type": "debugpy",
             "request": "launch",
-            "program": "inference.py",
+            "module": "scripts.inference",
             "console": "integratedTerminal",
             "args": [
                 "--batch-size",
                 "128",
                 "--device",
-                "cuda:0",
+                "cuda:1",
                 "--weights",
-                "results_deit-t_16bit/checkpoint.pth.tar"
+                "results/checkpoint.pth.tar",
+                "--data-path",
+                "/scratch2/ml_datasets/ILSVRC2012",
+            ],
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
+            "name": "scripts/inference.py evaluate 8bit",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.inference",
+            "console": "integratedTerminal",
+            "args": [
+                "--batch-size",
+                "128",
+                "--device",
+                "cuda:3",
+                "--weights",
+                "results_deit-t_8bit/checkpoint.pth.tar",
+                "--data-path",
+                "/scratch2/ml_datasets/ILSVRC2012",
+            ],
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
+            "name": "scripts/inference.py evaluate 16bit",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.inference",
+            "console": "integratedTerminal",
+            "args": [
+                "--batch-size",
+                "128",
+                "--device",
+                "cuda:2",
+                "--weights",
+                "results_deit-t_16bit/checkpoint.pth.tar",
+                "--data-path",
+                "/scratch2/ml_datasets/ILSVRC2012",
+            ],
+            "python": "${workspaceFolder}/myenv/bin/python"
+        },
+        {
+            "name": "softmax_approx_analysis.py external data and scale",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/softmax_approx_analysis.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--x-file",
+                "scripts/data/x_softmax_batch.txt",
+                "--scale-file",
+                "scripts/data/scaling_factor_batch.txt",
+                "--shape",
+                "128,3,197,197"
             ],
             "python": "${workspaceFolder}/myenv/bin/python"
         },
@@ -57,6 +156,14 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": "${command:pickArgs}"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "onnxModel",
+            "type": "promptString",
+            "description": "Enter the path to the ONNX model file",
+            "default": "${workspaceFolder}/scripts/onnx_model.onnx"
         }
     ]
 }
