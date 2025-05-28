@@ -287,9 +287,9 @@ def main():
             'mlp_out_bw': mlp_out_bw,
             'norm2_in_bw': norm2_in_bw,
             'att_block_out_bw': att_block_out_bw,
-            'gelu_type': args.gelu,
-            'softmax_type': args.softmax,
-            'layernorm_type': args.layernorm
+            'gelu_type': args.layer_type or args.gelu,
+            'softmax_type': args.layer_type or args.softmax,
+            'layernorm_type': args.layer_type or args.layernorm
         }, allow_val_change=True)
         wandb.watch(model, log='gradients', log_freq=100)
 

@@ -60,9 +60,12 @@ def summarise(df: pd.DataFrame, out: Path):
     special_types = [
         "QuantAct",
         "QuantConv2d",
-        "IntLayerNorm",
-        "IntGELU",
-        "IntSoftmax",
+        "IBERTIntLayerNorm",
+        "IVITIntLayerNorm",
+        "IBERTIntGELU",
+        "IVITIntGELU",
+        "IBERTIntSoftmax",
+        "IVITIntSoftmax",
     ]
     for typ in special_types:
         sub = df[df["type"] == typ]
@@ -73,6 +76,10 @@ def summarise(df: pd.DataFrame, out: Path):
         out_lines.append(f"  scale_in_max : {sub['scale_in'].max()}")
         out_lines.append(f"  scale_out_min: {sub['scale_out'].min()}")
         out_lines.append(f"  scale_out_max: {sub['scale_out'].max()}")
+        out_lines.append(f"  min_in: {sub['min_in'].min()}")
+        out_lines.append(f"  max_in: {sub['max_in'].max()}")
+        out_lines.append(f"  min_out: {sub['min_out'].min()}")
+        out_lines.append(f"  max_out: {sub['max_out'].max()}")
         out_lines.append(f"  min_in_int : {sub['min_in_int'].min()}")
         out_lines.append(f"  max_in_int : {sub['max_in_int'].max()}")
         out_lines.append(f"  min_out_int: {sub['min_out_int'].min()}")
