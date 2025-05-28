@@ -21,6 +21,7 @@ file automatically based on the mode.
 from __future__ import annotations
 import argparse, os, sys, json
 from pathlib import Path
+import time
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
@@ -29,10 +30,6 @@ from torch.utils.data import DataLoader
 import torchvision
 from models import *
 from utils import *
-
-# --- project-specific imports -------------------------------------------------
-# from models import deit_tiny_patch16_224
-# from models.quantization_utils.quant_modules import attach_io_stat_hooks, save_io_stats_df
 
 # -----------------------------------------------------------------------------
 #  Helpers
@@ -63,7 +60,7 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000):
 
 
 def preprocess_image(path: Path | str) -> torch.Tensor:
-    """Load and normalise a single image for DeiT-tiny (224×224)."""
+    """Load and normalise a single image for DeiT-tiny (224x224)."""
     tf = T.Compose([
         T.Resize(int(224 * 1.14)),  # 256 if you prefer standard
         T.CenterCrop(224),
@@ -74,10 +71,26 @@ def preprocess_image(path: Path | str) -> torch.Tensor:
     return tf(img)
 
 
-def evaluate_dataset(model, data_loader, device):
+# -----------------------------------------------------------------------------
+#  Evaluation / inference helpers
+# -----------------------------------------------------------------------------
+
+def evaluate_dataset(model, data_loader, device, *, print_batch_stats: bool = True):
+    """Run full evaluation.
+
+    Returns
+    -------
+    tuple[float, float]
+        Top-1 and Top-5 accuracy in percent.
+    """
     correct1 = correct5 = tot = 0
+    batch_times: list[float] = []
+    start_total = time.perf_counter()
+
     with torch.no_grad():
-        for imgs, targets in data_loader:
+        for i, (imgs, targets) in enumerate(data_loader):
+            t0 = time.perf_counter()
+
             imgs, targets = imgs.to(device), targets.to(device)
             logits = model(imgs)
             _, pred5 = logits.topk(5, dim=1)
@@ -85,17 +98,39 @@ def evaluate_dataset(model, data_loader, device):
             correct1 += (pred1 == targets).sum().item()
             correct5 += sum(t in p for t, p in zip(targets, pred5))
             tot += imgs.size(0)
+
+            # ───── per-batch timing ────────────────────────────────────
+            t_batch = time.perf_counter() - t0
+            batch_times.append(t_batch)
+            if print_batch_stats:                
+                throughput = imgs.size(0) / t_batch
+                print(f"Batch {i + 1:4}/{len(data_loader)} | "
+                      f"{t_batch * 1000:7.1f} ms | "
+                      f"{throughput:8.1f} img/s")
+
+    # ───── summary timing ─────────────────────────────────────────────
+    total_time = time.perf_counter() - start_total
+    avg_batch  = sum(batch_times) / len(batch_times)
+    avg_img    = total_time / tot if tot else 0.0
+    print(
+        f"Finished evaluation: total={total_time:.1f}s | "
+        f"avg/batch={avg_batch*1000:.1f} ms | "
+        f"avg/img={avg_img*1000:.2f} ms")
+
     return 100 * correct1 / tot, 100 * correct5 / tot
 
 
 def predict_single(model, img: torch.Tensor, device, labels_map: dict[int, str] | None):
     """Run forward pass on *one* image tensor and print Top-5."""
     model.eval()
+    start = time.perf_counter()
     with torch.no_grad():
         logits = model(img.unsqueeze(0).to(device))
         probs = F.softmax(logits, dim=1)[0]#TODO remove float softmax
         top5_prob, top5_idx = probs.topk(5)
-    print("Top-5 predictions:")
+    latency = (time.perf_counter() - start) * 1000
+
+    print("Top-5 predictions (latency = {:.1f} ms):".format(latency))
     for rank, (p, idx) in enumerate(zip(top5_prob.tolist(), top5_idx.tolist()), 1):
         label = labels_map.get(idx, str(idx)) if labels_map else str(idx)
         print(f"  #{rank}: class {idx:4} - {label:<25}  |  p={p:.4f}")
@@ -121,7 +156,7 @@ def main():
     ap.add_argument("--single-image", nargs="?", const="sample.png", default=None,
                     help="Run on exactly one image. If the flag is given without a value, uses 'sample.png'.")
     ap.add_argument("--labels", default=None,
-                    help="Optional JSON mapping class-id → label for pretty output")
+                    help="Optional JSON mapping class-id -> label for pretty output")
 
     # Export
     ap.add_argument("--export-onnx", default=None,
@@ -154,7 +189,6 @@ def main():
             export_params=True,
             do_constant_folding=True
         )
-        # print("ONNX model exported ->", onnx_output)
 
         # 2) Optionally run ORT extended graph fusions
         if args.ort:
@@ -167,7 +201,6 @@ def main():
             print("Optimized (ORT_ENABLE_EXTENDED) model saved ->", onnx_output)
         else:
             print("ONNX model exported ->", onnx_output)
-            
         return
     # Attach IO stat hooks to the model
     attach_io_stat_hooks(model)
@@ -205,9 +238,11 @@ def main():
     loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False,
                         num_workers=16, pin_memory=True)
 
-    top1, top5 = evaluate_dataset(model, loader, device)
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), "Starting evaluation …")  # [NEW]
+    top1, top5 = evaluate_dataset(model, loader, device, print_batch_stats=True)
     print(f"Validation set: Top-1 = {top1:.2f}%  |  Top-5 = {top5:.2f}%")
     save_io_stats_df("io_stats_val.pkl", to_csv=True)
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), "Evaluation finished.")  # [NEW]
 
 
 if __name__ == "__main__":
