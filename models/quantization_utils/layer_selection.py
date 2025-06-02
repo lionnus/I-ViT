@@ -2,12 +2,14 @@
 import torch.nn as nn
 from .ivit_modules import IVITIntGELU, IVITIntSoftmax, IVITIntLayerNorm
 from .ibert_modules   import IBERTIntGELU, IBERTIntSoftmax, IBERTIntLayerNorm
+from .icustom_modules import ICUSTOMIntGELU, ICUSTOMIntSoftmax
 
 # ---- GELU ------------------------------------------------------------
 GELU_REGISTRY = {
     "float":  nn.GELU,
     "ivit":   IVITIntGELU,
     "ibert":  IBERTIntGELU,
+    "icustom-v1": ICUSTOMIntGELU,
 }
 
 # ---- Softmax ---------------------------------------------------------
@@ -15,6 +17,7 @@ SOFTMAX_REGISTRY = {
     "float": nn.Softmax,
     "ivit":  IVITIntSoftmax,
     "ibert": IBERTIntSoftmax,
+    "icustom-v1": ICUSTOMIntSoftmax,
 }
 
 # ---- LayerNorm -------------------------------------------------------

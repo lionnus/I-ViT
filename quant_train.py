@@ -9,6 +9,7 @@ import math
 import logging
 import uuid
 import numpy as np
+from datetime import timedelta
 
 import torch
 import torch.nn as nn
@@ -151,11 +152,11 @@ parser.add_argument(
     help='Single bit-width or comma-separated list of 7 bit-widths for the respective locations: \
     patchembed, pos enc, attention out, softmax out, mlp out, norm 2 in, attention block out.'
 )
-parser.add_argument('--gelu',      default='ibert',  choices=['float','ivit','ibert'],
+parser.add_argument('--gelu',      default='ibert', 
                     help='GELU implementation to use')
-parser.add_argument('--softmax',   default='ibert',  choices=['float','ivit','ibert'],
+parser.add_argument('--softmax',   default='ibert',
                     help='Softmax implementation to use')
-parser.add_argument('--layernorm', default='ibert',  choices=['float','ivit','ibert'],
+parser.add_argument('--layernorm', default='ibert',
                     help='LayerNorm implementation to use')
 # Alternative to set all three at once
 parser.add_argument(
@@ -226,15 +227,22 @@ def main():
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
+    
     # Unpack model config for bitwidths
+    # Default bitwidths
+    default_bitwidths = [8, 8, 8, 8, 8, 8, 8]
+    
     if args.bitwidth is not None:
-        # turn "8,8,8,8,8,8,8"  →  [8,8,8,8,8,8,8]
+        # turn "8,8,8,8,8,8,8" into [8,8,8,8,8,8,8]
         bw_list = [int(x) for x in args.bitwidth.replace(',', ' ').split()]
         if len(bw_list) == 1:
             bw_list *= 7
         if len(bw_list) != 7:
             raise ValueError('--bitwidth must be 1 or 7 values')
         args.quant_bitwidths = bw_list
+    else:
+        args.quant_bitwidths = default_bitwidths
+        
     (
         patch_embed_bw,
         pos_encoding_bw,
@@ -244,6 +252,7 @@ def main():
         norm2_in_bw,
         att_block_out_bw
     ) = args.quant_bitwidths
+    
     # if the helper is set, override all three
     if args.layer_type is not None:
         args.gelu      = args.layer_type
@@ -335,7 +344,13 @@ def main():
 
     print(f"Start training for {args.epochs} epochs")
     best_epoch = 0
+    
+    # Initialize timing variables
+    epoch_times = []
+    
     for epoch in range(args.start_epoch, args.epochs):
+        epoch_start_time = time.time()
+        
         # train for one epoch
         train_loss = train(args, train_loader, model, criterion, optimizer, epoch,
               loss_scaler, args.clip_grad, model_ema, mixup_fn, device)
@@ -354,6 +369,17 @@ def main():
         #     }, checkpoint_path)
 
         acc1 = validate(args, val_loader, model, criterion_v, device)
+        
+        # Calculate epoch time and ETA
+        epoch_time = time.time() - epoch_start_time
+        epoch_times.append(epoch_time)
+        avg_epoch_time = np.mean(epoch_times[-10:])  # Average of last 10 epochs
+        remaining_epochs = args.epochs - epoch - 1
+        eta_seconds = avg_epoch_time * remaining_epochs
+        eta_str = str(timedelta(seconds=int(eta_seconds)))
+        
+        # Log timing info
+        logging.info(f'Epoch {epoch} completed in {timedelta(seconds=int(epoch_time))} - ETA: {eta_str}')
 
         #  WandB logging per epoch
         if not args.no_wandb:
@@ -361,7 +387,9 @@ def main():
                 'epoch': epoch,
                 'train_loss_epoch': train_loss,
                 'val_acc1': acc1,
-                'lr': optimizer.param_groups[0]['lr']
+                'lr': optimizer.param_groups[0]['lr'],
+                'epoch_time': epoch_time,
+                'eta_seconds': eta_seconds
             })
 
         # remember best acc@1 and save checkpoint
@@ -372,7 +400,35 @@ def main():
             best_epoch = epoch
             # save checkpoint with unique run_id
             ckpt_path = os.path.join(args.output_dir, f'checkpoint_{run_id}.pth.tar')
-            torch.save(model.state_dict(), ckpt_path)
+            
+            # Create model config to save with checkpoint
+            model_config = {
+                'model_name': args.model,
+                'num_classes': args.nb_classes,
+                'drop_rate': args.drop,
+                'drop_path_rate': args.drop_path,
+                'quant_bitwidths': args.quant_bitwidths,
+                'patch_embed_bw': patch_embed_bw,
+                'pos_encoding_bw': pos_encoding_bw,
+                'attention_out_bw': attention_out_bw,
+                'softmax_bw': softmax_bw,
+                'mlp_out_bw': mlp_out_bw,
+                'norm2_in_bw': norm2_in_bw,
+                'att_block_out_bw': att_block_out_bw,
+                'gelu_type': args.gelu,
+                'softmax_type': args.softmax,
+                'layernorm_type': args.layernorm
+            }
+            
+            # Save checkpoint with model config
+            torch.save({
+                'model': model.state_dict(),
+                'model_config': model_config,
+                'epoch': epoch,
+                'best_acc1': args.best_acc1,
+                'args': vars(args)  # Save all args for reference
+            }, ckpt_path)
+            
         logging.info(f'Acc at epoch {epoch}: {acc1}')
         logging.info(f'Best acc at epoch {best_epoch}: {args.best_acc1}')
 

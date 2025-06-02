@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader
 import torchvision
 from models import *
 from utils import *
+from tqdm import tqdm
 
 # --- project-specific imports -------------------------------------------------
 # from models import deit_tiny_patch16_224
@@ -40,30 +41,85 @@ from utils import *
 
 def load_model(checkpoint_path, device='cuda', num_classes=1000):
     """
-    Load the model with the given weights checkpoint.
+    Load the model with the given weights checkpoint, checks for configuration.
     """
-    model = deit_tiny_patch16_224(pretrained=False, num_classes=num_classes, drop_rate=0.0, drop_path_rate=0.1)
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Check if model_config exists in checkpoint (new format)
+    if 'model_config' in checkpoint:
+        config = checkpoint['model_config']
+        print(f"\nLoading model with saved configuration:")
+        print(f"  Model: {config.get('model_name', 'deit_tiny')}")
+        print(f"  Quantization bitwidths: {config.get('quant_bitwidths', [8,8,8,8,8,8,8])}")
+        print(f"  GELU type: {config.get('gelu_type', 'ibert')}")
+        print(f"  Softmax type: {config.get('softmax_type', 'ibert')}")
+        print(f"  LayerNorm type: {config.get('layernorm_type', 'ibert')}")
+        
+        # Create model with saved configuration
+        model = deit_tiny_patch16_224(
+            pretrained=False,
+            num_classes=config.get('num_classes', num_classes),
+            drop_rate=config.get('drop_rate', 0.0),
+            drop_path_rate=config.get('drop_path_rate', 0.1),
+            patch_embed_bw=config.get('patch_embed_bw', 8),
+            pos_encoding_bw=config.get('pos_encoding_bw', 8),
+            attention_out_bw=config.get('attention_out_bw', 8),
+            softmax_bw=config.get('softmax_bw', 8),
+            mlp_out_bw=config.get('mlp_out_bw', 8),
+            norm2_in_bw=config.get('norm2_in_bw', 8),
+            att_block_out_bw=config.get('att_block_out_bw', 8),
+            gelu_type=config.get('gelu_type', 'ibert'),
+            softmax_type=config.get('softmax_type', 'ibert'),
+            layernorm_type=config.get('layernorm_type', 'ibert')
+        )
+        
+        # Print additional info if available
+        if 'epoch' in checkpoint:
+            print(f"  Checkpoint from epoch: {checkpoint['epoch']}")
+        if 'best_acc1' in checkpoint:
+            print(f"  Best validation accuracy: {checkpoint['best_acc1']:.2f}%")
+    else:
+        # Old checkpoint format or missing config - use defaults
+        print("\nNo model configuration found in checkpoint, using default configuration")
+        print("  (This is normal for older checkpoints)")
+        model = deit_tiny_patch16_224(
+            pretrained=False,
+            num_classes=num_classes,
+            drop_rate=0.0,
+            drop_path_rate=0.1
+        )
+    
+    # Load model weights
+    if 'model' in checkpoint:
+        # New format with model state dict under 'model' key
+        checkpoint_weights = checkpoint['model']
+    else:
+        # Old format where checkpoint is the state dict
+        checkpoint_weights = checkpoint
+    
     model_state_dict = model.state_dict()
-    for name, param in checkpoint.items():
+    for name, param in checkpoint_weights.items():
         if name in model_state_dict:
             # If checkpoint param is a scalar [] but the model expects [1], unsqueeze it.
             if param.shape == torch.Size([]) and model_state_dict[name].shape == torch.Size([1]):
-                checkpoint[name] = param.unsqueeze(0)
-    model.load_state_dict(checkpoint, strict=False)
+                checkpoint_weights[name] = param.unsqueeze(0)
+    
+    model.load_state_dict(checkpoint_weights, strict=False)
     model.to(device)
     model.eval()
+    
     # One dummy forward pass to warm up the model
     dummy_input = torch.randn(1, 3, 224, 224, device=device)
     with torch.no_grad():
         _ = model(dummy_input)
+    
     # Freeze the model to prevent further training
     freeze_model(model)
     return model
 
 
 def preprocess_image(path: Path | str) -> torch.Tensor:
-    """Load and normalise a single image for DeiT-tiny (224×224)."""
+    """Load and normalise a single image for DeiT-tiny (224by224)."""
     tf = T.Compose([
         T.Resize(int(224 * 1.14)),  # 256 if you prefer standard
         T.CenterCrop(224),
@@ -76,8 +132,9 @@ def preprocess_image(path: Path | str) -> torch.Tensor:
 
 def evaluate_dataset(model, data_loader, device):
     correct1 = correct5 = tot = 0
+    model.eval()
     with torch.no_grad():
-        for imgs, targets in data_loader:
+        for imgs, targets in tqdm(data_loader, desc="Val", unit="batch", dynamic_ncols=True):
             imgs, targets = imgs.to(device), targets.to(device)
             logits = model(imgs)
             _, pred5 = logits.topk(5, dim=1)
@@ -93,9 +150,9 @@ def predict_single(model, img: torch.Tensor, device, labels_map: dict[int, str] 
     model.eval()
     with torch.no_grad():
         logits = model(img.unsqueeze(0).to(device))
-        probs = F.softmax(logits, dim=1)[0]#TODO remove float softmax
+        probs = F.softmax(logits, dim=1)[0]
         top5_prob, top5_idx = probs.topk(5)
-    print("Top-5 predictions:")
+    print("\nTop-5 predictions:")
     for rank, (p, idx) in enumerate(zip(top5_prob.tolist(), top5_idx.tolist()), 1):
         label = labels_map.get(idx, str(idx)) if labels_map else str(idx)
         print(f"  #{rank}: class {idx:4} - {label:<25}  |  p={p:.4f}")
@@ -133,6 +190,7 @@ def main():
     device = torch.device(args.device)
     
     # Load model from checkpoint.
+    print(f"Loading checkpoint from: {args.weights}")
     model = load_model(args.weights, device=device, num_classes=1000)
     
     # If --export-onnx flag is provided, export to ONNX and exit.
@@ -154,7 +212,6 @@ def main():
             export_params=True,
             do_constant_folding=True
         )
-        # print("ONNX model exported ->", onnx_output)
 
         # 2) Optionally run ORT extended graph fusions
         if args.ort:
@@ -169,13 +226,16 @@ def main():
             print("ONNX model exported ->", onnx_output)
             
         return
+    
     # Attach IO stat hooks to the model
     attach_io_stat_hooks(model)
+    
     # ───────── single-image inference ────────────────────────────────────
     if args.single_image is not None:
         img_path = Path(args.single_image)
         if not img_path.exists():
             sys.exit(f"ERR: image '{img_path}' not found")
+        print(f"Running inference on: {img_path}")
         img_tensor = preprocess_image(img_path)
         # optional labels map
         labels_map = None
@@ -194,6 +254,8 @@ def main():
     if not val_dir.exists():
         sys.exit(f"ERR: validation directory '{val_dir}' not found")
 
+    print(f"Evaluating on validation set: {val_dir}")
+    
     tf = T.Compose([
         T.Resize(int(224 * 1.14)),
         T.CenterCrop(224),
@@ -206,7 +268,9 @@ def main():
                         num_workers=16, pin_memory=True)
 
     top1, top5 = evaluate_dataset(model, loader, device)
-    print(f"Validation set: Top-1 = {top1:.2f}%  |  Top-5 = {top5:.2f}%")
+    print(f"\nValidation Results:")
+    print(f"  Top-1 Accuracy: {top1:.2f}%")
+    print(f"  Top-5 Accuracy: {top5:.2f}%")
     save_io_stats_df("io_stats_val.pkl", to_csv=True)
 
 

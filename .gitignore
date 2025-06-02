@@ -1,4 +1,5 @@
-*myenv*
+*env*
 *cache*
 *.log
 wandb*
+results*
