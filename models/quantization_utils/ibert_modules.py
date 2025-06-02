@@ -80,6 +80,33 @@ class IBERTIntLayerNorm(nn.Module):
         y_sq_int = y_int_shifted ** 2
         var_int = torch.sum(y_sq_int, axis=2, keepdim=True)
         return var_int
+    
+    def integer_sqrt(self, n: torch.Tensor) -> torch.Tensor:
+        """
+        Vectorized integer sqrt as described in I-BERT paper.
+        """
+        # record vector mask to force zero at the end
+        mask = n > 0
+
+        # clamp negatives to 0
+        n = torch.clamp(n, min=0)
+
+        # avoid log2(0) by clamping up to 1
+        bits = torch.floor(torch.log2(n.float().clamp(min=1))) + 1
+
+        # initial guess: 2^ceil(bits/2)
+        x = (2 ** torch.ceil(bits / 2)).to(torch.int64)
+
+        # 4 Newton steps
+        for _ in range(4):
+            inv = floor_ste.apply(n / torch.clamp(x, min=1))
+            x = floor_ste.apply((x + inv) / 2)
+
+        x32 = x.to(torch.int32)
+
+        # zero out everything that was ≤0 at start
+        return torch.where(mask, x32, torch.zeros_like(x32))
+
 
     def forward(self, x, scaling_factor=None, exponents=None):
         if self.quant_mode == 'none':

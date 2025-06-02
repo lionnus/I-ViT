@@ -85,7 +85,7 @@ class IntSoftmax_IVIT(nn.Module):
         """
         Integer approximation of exp(x) in Q-domain
         """
-        # --- Shift approximation of exp(x) ---------------------
+        # shift approximation of exp(x)
         x_int = x_int + torch.floor(x_int / 2) - torch.floor(x_int / 16)
 
         with torch.no_grad():
@@ -106,16 +106,7 @@ class IntSoftmax_IVIT(nn.Module):
         scaling_factor = scaling_factor / 2 ** self.n
         return exp_int, scaling_factor
 
-    # ----------------------------------------------------------
-    # forward
-    # ----------------------------------------------------------
     def forward(self, x: torch.Tensor, scaling_factor: torch.Tensor):
-        """
-        Parameters
-        ----------
-        x               : (…, N) tensor of *floating* activations
-        scaling_factor  : scalar tensor
-        """
         device = x.device
         scaling_factor = scaling_factor.to(device)
 
@@ -141,7 +132,7 @@ class IntSoftmax_IVIT(nn.Module):
             device=device
         )
 
-        # save scaling factor (nice for tensorboard / debugging)
+        # save scaling factor
         self.act_scaling_factor = scaling_factor.detach()
         return exp_int * scaling_factor, scaling_factor
 
@@ -206,12 +197,11 @@ class IntSoftmax_IBERT(nn.Module):
         scaling_factor = exp_scale / 2 ** self.n
         return exp_int, scaling_factor
 
-    # ----------------------------------------------------------
     def forward(self, x: torch.Tensor, scaling_factor: torch.Tensor):
         device = x.device
         scaling_factor = scaling_factor.to(device)
 
-        # optional “float mode” passthrough
+        # float mode passthrough
         if self.quant_mode == 'none':
             return F.softmax(x, dim=-1), None
 
@@ -252,7 +242,6 @@ def print_stats(name: str, err: torch.Tensor):
         f"| mean {err.mean():.6e} "
         f"| median {err.median():.6e}"
     )
-
 
 # ------------------------------------------------------------------
 # Entry point
@@ -334,7 +323,7 @@ def main():
     print_stats("I-BERT IntSoftmax", abs_err_ibert)
 
         
-    # 4.2 Bar chart: pick a representative/random row
+    # 4.2 Bar chart: random row
     sel = (0, 0, 0)               # (batch, head, token)
     true_row  = y_float [sel].cpu().numpy()
     ivit_row  = y_ivit  [sel].cpu().numpy()
@@ -362,7 +351,7 @@ def main():
                 s=3, alpha=0.9, marker='.', linewidths=0,
                 label="I-BERT")
     plt.plot([0, 1], [0, 1], 'k--', linewidth=0.7)
-    plt.title("Float vs Integer Softmax (128 batch size, 197 model dim)")
+    plt.title("Float vs Integer Softmax (128 batch size, 197 model dim)") # TODO: change title duynamically
     plt.xlabel("Float Softmax"); plt.ylabel("IntSoftmax")
     leg = plt.legend(scatterpoints=1, markerscale=6)  # markerscale increases legend dot size
     
@@ -375,15 +364,15 @@ def main():
     plt.show()
 
     
-    # 4.3 Density plot with hexbin
-    plt.hexbin(flat_true, flat_ivit, gridsize=60, cmap='Blues', mincnt=1, linewidths=0.2, alpha=0.9)
-    plt.hexbin(flat_true, flat_ibert, gridsize=60, cmap='Oranges', mincnt=1, linewidths=0.2, alpha=0.6)
-    plt.plot([0, 1], [0, 1], 'k--', linewidth=0.7)
-    plt.title("Float vs Integer Softmax - density view")
-    plt.xlabel("Float Softmax"); plt.ylabel("IntSoftmax")
-    cb = plt.colorbar(label="count per bin")
-    plt.grid(True); plt.tight_layout()
-    plt.show()
+    # 4.3 Density plot with hexbin -> Takes a long time to compute
+    # plt.hexbin(flat_true, flat_ivit, gridsize=60, cmap='Blues', mincnt=1, linewidths=0.2, alpha=0.9)
+    # plt.hexbin(flat_true, flat_ibert, gridsize=60, cmap='Oranges', mincnt=1, linewidths=0.2, alpha=0.6)
+    # plt.plot([0, 1], [0, 1], 'k--', linewidth=0.7)
+    # plt.title("Float vs Integer Softmax - density view")
+    # plt.xlabel("Float Softmax"); plt.ylabel("IntSoftmax")
+    # cb = plt.colorbar(label="count per bin")
+    # plt.grid(True); plt.tight_layout()
+    # plt.show()
     # 4.4 Histogram of absolute errors
     err_ivit_vals  = abs_err_ivit .view(-1).cpu().numpy()
     err_ibert_vals = abs_err_ibert.view(-1).cpu().numpy()

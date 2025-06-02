@@ -32,28 +32,23 @@ class IntGELU_IViT(nn.Module):
         device = x_int.device
         x_int = x_int.to(torch.int32)
 
-        # the “shift” approximation
         x_int = x_int + torch.floor(x_int / 2) \
                      - torch.floor(x_int / 16)
 
-        # floor(-1/scale) on correct device
         with torch.no_grad():
             x0_int = torch.floor(-1.0 / scaling_factor).to(device)
 
         x_int = torch.max(x_int, self.n * x0_int)
 
-        # quotient & remainder
         q = torch.floor(x_int / x0_int)
         r = x_int - x0_int * q
 
-        # build exp(r/q) approximation
         exp_int = r / 2 - x0_int
         exp_int = torch.clamp(
             torch.floor(exp_int * (2 ** (self.n - q))),
             min=0
         )
 
-        # update scale
         scaling_factor = scaling_factor / (2 ** self.n)
         return exp_int, scaling_factor
 
@@ -61,25 +56,25 @@ class IntGELU_IViT(nn.Module):
         device = x.device
         scaling_factor = scaling_factor.to(device)
 
-        # 1) quantize input
+        # quantize input
         pre_x_int = x / scaling_factor
 
-        # 2) subtract max for numerical stability
+        # subtract max for numerical stability
         x_int_max, _ = pre_x_int.max(dim=-1, keepdim=True)
         x_int = pre_x_int - x_int_max
 
-        # 3) approximate exp(x−max) and exp(−max)
+        # approximate exp(x−max) and exp(−max)
         sig_scale = scaling_factor * 1.702
         exp_int, _     = self.int_exp_shift(x_int, sig_scale)
         exp_int_max, _ = self.int_exp_shift(-x_int_max, sig_scale)
 
-        # 4) sum & normalize
+        # sum & normalize
         exp_sum = exp_int + exp_int_max
         temp_exp_sum = exp_sum
         exp_sum = exp_sum.clamp_max(2**31 - 1)
         factor  = torch.floor((2**31 - 1) / exp_sum)
 
-        # 5) build integer sigmoid
+        # build integer sigmoid
         sigmoid_int   = torch.floor(
             exp_int * factor / (2 ** (31 - self.output_bit + 1))
         )
@@ -88,11 +83,10 @@ class IntGELU_IViT(nn.Module):
             device=device
         )
 
-        # 6) multiply through
+        # multiply scaling
         out_int   = pre_x_int * sigmoid_int
         out_scale = scaling_factor * sigmoid_scale
 
-        # save for introspection
         self.act_scaling_factor = out_scale.detach()
         return out_int * out_scale, out_scale
 
@@ -109,7 +103,7 @@ class IntGELU_IBERT(nn.Module):
         self.k = 1.4142
         self.n = 6  # sufficiently large integer
         self.coeff = [-0.2888, -1.769, 1]  # a(x+b)**2 + c
-        self.coeff[2] /= self.coeff[0]
+        self.coeff[2] /= self.coeff[0] # c = 1/a
 
     def fix(self):  pass
     def unfix(self):  pass
@@ -137,19 +131,19 @@ class IntGELU_IBERT(nn.Module):
             x_int, scaling_factor / self.k
         )
 
-        shift_int = torch.floor(1.0 / sigmoid_scaling_factor) # 1/(scale_in^2*-0.2888*2^14)
+        shift_int = torch.floor(1.0 / sigmoid_scaling_factor) # 1/(scale_in^2*-0.2888*2^n), where n is self.n set in __init__
 
         x_int = x_int * (sigmoid_int + shift_int)
         scaling_factor = scaling_factor * sigmoid_scaling_factor / 2
-
+        
         return x_int * scaling_factor, scaling_factor
 
 # ------------------------------------------------------------------
-# Helper: figure sizing that respects the stylesheet
+# PLot helper function
 # ------------------------------------------------------------------
 
 def new_figure(nrows: int = 1, height_mul: float = 1.0):
-    """Return a (fig, axes) tuple sized for *nrows* stacked subplots."""
+    """Return a (fig, axes) tuple sized for nrows stacked subplots."""
     width, base_h = plt.rcParams['figure.figsize']
     fig_height = base_h * height_mul
     return plt.subplots(nrows=nrows, ncols=1 if nrows == 1 else 2,
@@ -192,11 +186,11 @@ def run_comparison():
     _stats("I-BERT IntGELU", abs_err_ibert, rel_err_ibert)
 
     # 5. Figure with 4 panels --------------------------------------
-    fig, axes = new_figure(nrows=2, height_mul=2)  # height≈5 in
+    fig, axes = new_figure(nrows=2, height_mul=2) 
     ax11, ax12 = axes[0]
     ax21, ax22 = axes[1]
 
-    # (a) GELU & approximations
+    # GELU & approximations
     ax11.plot(x, y_float, label="Float GELU")
     ax11.plot(x, y_ivit,  '--', label="I-ViT IntGELU")
     ax11.plot(x, y_ibert, ':',  label="I-BERT IntGELU")
@@ -205,7 +199,7 @@ def run_comparison():
     ax11.set_ylabel("GELU(x)")
     ax11.legend()
 
-    # (b) absolute error
+    # absolute error
     ax12.plot(x, abs_err_ivit,  label="I-ViT abs err")
     ax12.plot(x, abs_err_ibert, label="I-BERT abs err")
     ax12.set_title("Absolute Error")
@@ -213,7 +207,7 @@ def run_comparison():
     ax12.set_ylabel("|error|")
     ax12.legend()
 
-    # (c) percentage error
+    # percentage error
     ax21.plot(x, rel_err_ivit,  label="I-ViT % err")
     ax21.plot(x, rel_err_ibert, label="I-BERT % err")
     ax21.set_title("Percentage Error")
@@ -221,7 +215,7 @@ def run_comparison():
     ax21.set_ylabel("Error (%)")
     ax21.legend()
 
-    # (d) log-scale absolute error
+    # log-scale absolute error
     ax22.semilogy(x, abs_err_ivit,  '--', label="I-ViT abs err")
     ax22.semilogy(x, abs_err_ibert, ':',  label="I-BERT abs err")
     ax22.set_title("Absolute Error (log-scale)")
@@ -232,7 +226,7 @@ def run_comparison():
     fig.show()
 
     # 6. Bin-wise error distribution -------------------------------
-    fig2, ax = new_figure()  # single-panel figure (3.5×2.5 in)
+    fig2, ax = new_figure()
     bins = np.linspace(-full_scale / 2, full_scale / 2, 11)
     bin_centers = (bins[:-1] + bins[1:]) / 2
     ivit_bin_err  = []
