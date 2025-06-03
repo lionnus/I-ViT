@@ -138,8 +138,7 @@ class IBERTIntLayerNorm(nn.Module):
                 var_int = self.overflow_fallback(y_int)
                 assert var_int.max() < 2**32
         
-        # To be replaced with integer-sqrt kernel that produces the same output
-        std_int = floor_ste.apply(torch.sqrt(var_int)) * 2 ** self.shift 
+        std_int = floor_ste.apply(self.integer_sqrt(var_int)) * 2 ** self.shift 
         factor = floor_ste.apply(2**31 / std_int)
         y_int = floor_ste.apply(y_int * factor / 2)
         scaling_factor = self.dim_sqrt / 2**30
