@@ -83,7 +83,8 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000):
             pretrained=False,
             num_classes=num_classes,
             drop_rate=0.0,
-            drop_path_rate=0.1
+            drop_path_rate=0.1,
+            gelu_type='icustom-v1'
         )
     
     # Load model weights
@@ -158,11 +159,11 @@ def evaluate_dataset(model, data_loader, device, *, print_batch_stats: bool = Tr
             # ───── per-batch timing ────────────────────────────────────
             t_batch = time.perf_counter() - t0
             batch_times.append(t_batch)
-            if print_batch_stats:                
-                throughput = imgs.size(0) / t_batch
-                print(f"Batch {i + 1:4}/{len(data_loader)} | "
-                      f"{t_batch * 1000:7.1f} ms | "
-                      f"{throughput:8.1f} img/s")
+            # if print_batch_stats:                
+            #     throughput = imgs.size(0) / t_batch
+            #     print(f"Batch {i + 1:4}/{len(data_loader)} | "
+            #           f"{t_batch * 1000:7.1f} ms | "
+            #           f"{throughput:8.1f} img/s")
 
     # ───── summary timing ─────────────────────────────────────────────
     total_time = time.perf_counter() - start_total
