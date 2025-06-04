@@ -1,6 +1,5 @@
 """
 Custom Integer GELU implementation using piecewise polynomial approximation
-Following the I-ViT interface pattern with proper scaling factor handling
 """
 
 import torch
@@ -9,14 +8,13 @@ import numpy as np
 from scipy.special import erf
 from .quant_utils import floor_ste
 
-
 class ICUSTOMIntGELU(nn.Module):
     """
     Implementation of Integer GELU using piecewise polynomial approximation
-    Class to quantize given GELU layer using polynomial segments
+    Uses float GELU for gradient computation to avoid OOM issues
     """
     
-    def __init__(self, output_bit=8, N=20, segments=16, degree=2):
+    def __init__(self, output_bit=8, N=24, segments=16, degree=1):
         super(ICUSTOMIntGELU, self).__init__()
         self.output_bit = 16  # ignore for now, handled in quantAct after?
         self.N = N  # Bit shift for integer representation
@@ -25,6 +23,9 @@ class ICUSTOMIntGELU(nn.Module):
         
         # GELU approx range
         self.input_range = (-5.0, 5.0)
+
+        # Torch module for float gelu backward pass
+        self.gelu_module = nn.GELU()
         
         # Fit the piecewise polynomials once during initialization
         self.float_pieces = self._fit_piecewise_polynomials()
@@ -56,12 +57,13 @@ class ICUSTOMIntGELU(nn.Module):
         pass
     
     def forward(self, x, scaling_factor):
-        """Evaluate piecewise polynomial for integer inputs."""
+        """Evaluate piecewise polynomial for integer inputs with float GELU gradients."""
         
-        # Convert input to integer representation (STE still tracked)
+        # Convert input to integer representation
         x_int = floor_ste.apply(x / scaling_factor)
         
-        # Build integer bounds and integer coefficients under torch.no_grad (only once per forward)
+        # Build integer bounds and integer coefficients with torch.no_grad
+        # to avoid building gradient graph for the polynomial fitting
         with torch.no_grad():
             s_in = scaling_factor
             lo_list = []
@@ -72,7 +74,7 @@ class ICUSTOMIntGELU(nn.Module):
                 hi_i = torch.floor(torch.tensor(hi_f, device=x_int.device) / s_in)
                 lo_list.append(lo_i)
                 hi_list.append(hi_i)
-                # Convert float coeffs → integer coeffs
+                # Convert float coeffs into integer coeffs
                 deg = len(coeffs) - 1
                 this_int_coeffs = []
                 for i, coeff in enumerate(coeffs):
@@ -84,15 +86,12 @@ class ICUSTOMIntGELU(nn.Module):
             hi_i = torch.stack(hi_list)          # (segments,)
             coeffs_tensor = torch.stack(int_coeffs_list)  # (segments, degree+1)
         
-        # Initialize output as float on same device
+        # Initialize output
         y_int = torch.zeros_like(x_int, dtype=torch.float32)
         S = self.segments
         D = self.degree
         
-        #  ─── Now, evaluate polynomial **without** building a gradient graph ───
-        # By putting the Horner‐loop under torch.no_grad(), we do not store any of these
-        # multiplications/additions in the autograd buffer.  Only floor_ste.apply(...) 
-        # (earlier) will carry gradient (STE).
+        # Evaluate polynomial, again without building gradient graph
         with torch.no_grad():
             for i in range(S):
                 if i == 0:
@@ -104,23 +103,26 @@ class ICUSTOMIntGELU(nn.Module):
                 if not mask_i.any():
                     continue
 
-                x_seg = x_int[mask_i]  # 1D slice of all elements in segment i
+                x_seg = x_int[mask_i]  # all elements in segment i
                 c = coeffs_tensor[i]   # shape (degree+1,)
                 
-                # Horner's rule (all in no_grad)
+                # Horner's rule
                 r = c[0].to(x_seg.dtype)
                 for idx in range(1, D + 1):
                     r = r * x_seg + c[idx]
 
-                # Store the “integer” result back into y_int (also no_grad)
+                # Store result
                 y_int[mask_i] = r
         
-        # Now y_int is available as a float‐tensor but with no “grad graph” from the polynomial.
-        # We only need gradient w.r.t. x_int via floor_ste, so detach is fine here:
-        y_int = y_int.detach()  # ensure no leftover graph
+        # Compute float GELU for gradient path
+        y_float_gelu = self.gelu_module(x)
         
-        # Convert integer result back to float by dividing by 2^N
+        # Convert integer result back to float
         y_float = y_int / (2 ** self.N)
+        
+        # replaces the forward pass with integer computation but uses float GELU derivatives for backprop
+        y_float = y_float.detach() + (y_float_gelu - y_float_gelu.detach())
+
         scaling_factor_out = scaling_factor / (2 ** self.N)
 
         return y_float, scaling_factor_out
@@ -133,13 +135,13 @@ class ICUSTOMIntSoftmax(nn.Module):
     
     def __init__(self, output_bit=16, N=20, segments=16, degree=2):
         super(ICUSTOMIntSoftmax, self).__init__()
-        self.output_bit = output_bit
+        self.output_bit = 8  # ignore for now, handled in quantAct after?
         self.N = N  # Bit shift for integer representation
         self.segments = segments
         self.degree = degree
         
         # Exponential approximation range
-        self.input_range = (-20.0, 0.0)
+        self.input_range = (-11.0, 0.0)
         
         # Fit the piecewise polynomials once during initialization
         self.float_pieces = self._fit_piecewise_polynomials()
@@ -148,10 +150,10 @@ class ICUSTOMIntSoftmax(nn.Module):
     
     def _exp_func(self, x):
         """Standard exponential function for fitting"""
-        return np.exp(np.clip(x, -50, 50))  # Clip to avoid overflow/underflow
+        return np.exp(np.clip(x, -50, 50))  # Clip to avoid overflow/underflow?
     
     def _fit_piecewise_polynomials(self):
-        """Fit piecewise polynomials to approximate exp(x)."""
+        """Fit piecewise polynomials to approximate GELU."""
         x_lo, x_hi = self.input_range
         xs = np.linspace(x_lo, x_hi, 10000, dtype=np.float32)
         ys = self._exp_func(xs)
@@ -160,20 +162,10 @@ class ICUSTOMIntSoftmax(nn.Module):
         pieces = []
         for lo, hi in zip(bounds[:-1], bounds[1:]):
             mask = (xs >= lo) & (xs <= hi)
-            if np.sum(mask) < self.degree + 1:
-                # Not enough points for fitting, use neighboring points
-                center = (lo + hi) / 2
-                distances = np.abs(xs - center)
-                indices = np.argsort(distances)[:max(self.degree + 1, 10)]
-                x_fit = xs[indices]
-                y_fit = ys[indices]
-            else:
-                x_fit = xs[mask]
-                y_fit = ys[mask]
-            
-            coeffs = np.polyfit(x_fit, y_fit, self.degree).astype(np.float32)
+            coeffs = np.polyfit(xs[mask], ys[mask], self.degree).astype(np.float32)
             pieces.append(((lo, hi), coeffs))
         return pieces
+    
     
     def fix(self):
         pass
@@ -184,7 +176,7 @@ class ICUSTOMIntSoftmax(nn.Module):
     def int_exp_poly(self, x_int, scaling_factor):
         """Evaluate piecewise polynomial for exponential approximation."""
         
-        # Build integer bounds and integer coefficients under torch.no_grad
+        # Build integer bounds and integer coefficients without building gradient graph
         with torch.no_grad():
             s_in = scaling_factor
             lo_list = []
@@ -197,7 +189,7 @@ class ICUSTOMIntSoftmax(nn.Module):
                 lo_list.append(lo_i)
                 hi_list.append(hi_i)
                 
-                # Convert float coeffs → integer coeffs
+                # Convert float coeffs into integer coeffs
                 deg = len(coeffs) - 1
                 this_int_coeffs = []
                 for i, coeff in enumerate(coeffs):
@@ -255,31 +247,30 @@ class ICUSTOMIntSoftmax(nn.Module):
         # Convert to integer representation
         x_int = floor_ste.apply(x / scaling_factor)
         
-        # Subtract max for numerical stability (standard softmax trick)
+        # Subtract max
         with torch.no_grad():
             x_int_max, _ = x_int.max(dim=-1, keepdim=True)
         x_int = x_int - x_int_max
         
         # Apply polynomial exponential approximation
-        exp_result, exp_scaling = self.int_exp_poly(x_int, scaling_factor)
+        exp_result, exp_scaling = self.int_exp_poly(x_int, scaling_factor) # TODO: Take care of backward prop since int_exp doesnt store gradents?
         
         # Convert back to integer for summation
         exp_int = floor_ste.apply(exp_result / exp_scaling)
         
         # Sum for normalization
         exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
-        exp_int_sum = torch.clamp(exp_int_sum, min=1)  # Avoid division by zero
+        exp_int_sum = torch.clamp(exp_int_sum, min=1)  # Avoid div by zero
         
-        # Normalize to get probabilities
-        # Scale factor to maintain precision
+        # Normalize
         max_val = 2 ** (31 - 1) - 1  # Max positive int32
         factor = floor_ste.apply(max_val / exp_int_sum)
         
         # Apply normalization factor
-        normalized_int = floor_ste.apply(exp_int * factor / (2 ** (31 - self.output_bit + 1)))
+        normalized_int = floor_ste.apply(exp_int * factor / (2 ** (31 - self.output_bit)))
         
         # Final scaling factor for output
-        output_scaling_factor = torch.tensor(1.0 / (2 ** (self.output_bit - 1)), 
+        output_scaling_factor = torch.tensor(1.0 / (2 ** (self.output_bit)), 
                                            device=x.device, dtype=x.dtype)
         
         # Store scaling factor
