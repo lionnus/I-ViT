@@ -184,9 +184,9 @@ class VisionTransformer(nn.Module):
             mlp_out_bw=8,
             norm2_in_bw=8,
             att_block_out_bw=8,
-            gelu_type='ivit',
-            softmax_type='ivit',
-            layernorm_type='ivit'):
+            gelu_type='ibert',
+            softmax_type='ibert',
+            layernorm_type='ibert'):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = (
