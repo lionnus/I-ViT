@@ -72,7 +72,7 @@ class IntSoftmax_Piecewise(nn.Module):
     Implementation of Integer Softmax using piecewise polynomial approximation for exp()
     """
     
-    def __init__(self, output_bit=8, N=20, segments=32, degree=2):
+    def __init__(self, output_bit=8, N=24, segments=16, degree=2):
         super().__init__()
         self.output_bit = output_bit
         self.N = N  # Bit shift for integer representation
@@ -80,17 +80,16 @@ class IntSoftmax_Piecewise(nn.Module):
         self.degree = degree
         
         # Exponential approximation range (typical softmax input range after max subtraction)
-        # After subtracting max, inputs are typically in range [-10, 0] or similar
         self.input_range = (-10.0, 0.0)
         
         # Fit the piecewise polynomials once during initialization
         self.float_pieces = self._fit_piecewise_polynomials()
         
-        self.register_buffer('act_scaling_factor', torch.zeros(1))
+        # self.register_buffer('act_scaling_factor', torch.zeros(1))
     
     def _exp_func(self, x):
         """Standard exponential function for fitting"""
-        return np.exp(x) + 1e-10  # Clip to avoid overflow/underflow?
+        return np.exp(x)
     
     def _fit_piecewise_polynomials(self):
         """Fit piecewise polynomials to approximate exp(x)."""
@@ -119,7 +118,6 @@ class IntSoftmax_Piecewise(nn.Module):
     
     def int_exp_poly(self, x_int, scaling_factor):
         """Evaluate piecewise polynomial for exponential approximation."""
-        
         # Build integer bounds and integer coefficients under torch.no_grad
         with torch.no_grad():
             s_in = scaling_factor
@@ -128,12 +126,12 @@ class IntSoftmax_Piecewise(nn.Module):
             int_coeffs_list = []
             
             for (lo_f, hi_f), coeffs in self.float_pieces:
-                lo_i = torch.floor(torch.tensor(lo_f, device=x_int.device) / s_in)
-                hi_i = torch.floor(torch.tensor(hi_f, device=x_int.device) / s_in)
+                lo_i = torch.floor(torch.tensor(lo_f/s_in, device=x_int.device))
+                hi_i = torch.floor(torch.tensor(hi_f/s_in, device=x_int.device))
                 lo_list.append(lo_i)
                 hi_list.append(hi_i)
                 
-                # Convert float coeffs → integer coeffs
+                # Convert float coeffs to integer coeffs
                 deg = len(coeffs) - 1
                 this_int_coeffs = []
                 for i, coeff in enumerate(coeffs):
@@ -174,50 +172,47 @@ class IntSoftmax_Piecewise(nn.Module):
                 
                 exp_int[mask_i] = r
         
-        exp_int = exp_int.detach()
+        # Clamp to ensure positive values (exp should always be positive)
+        # exp_int = torch.clamp(exp_int, min=1e-10)
         
-        # Convert integer result back to float
-        exp_float = exp_int / (2 ** self.N)
+        # The output scaling factor accounts for the 2^N factor
         scaling_factor_out = scaling_factor / (2 ** self.N)
         
-        # Ensure non-negative (exp should always be positive)
-        exp_float = torch.clamp(exp_float, min=1e-10)
-        
-        return exp_float, scaling_factor_out
+        return exp_int, scaling_factor_out
     
     def forward(self, x, scaling_factor):
         """Forward pass implementing integer softmax with polynomial exp approximation."""
+        device = x.device
+        scaling_factor = scaling_factor.to(device)
         
         # Convert to integer representation
-
-        x_int = torch.floor(x / scaling_factor)
+        x_int = torch.floor(x / scaling_factor).to(torch.int32)
         
         # Subtract max for numerical stability (standard softmax trick)
-        with torch.no_grad():
-            x_int_max, _ = x_int.max(dim=-1, keepdim=True)
+        x_int_max, _ = x_int.max(dim=-1, keepdim=True)
         x_int = x_int - x_int_max
         
         # Apply polynomial exponential approximation
-        exp_result, exp_scaling = self.int_exp_poly(x_int, scaling_factor)
-        
-        # Convert back to integer for summation
-        exp_int = torch.floor(exp_result / exp_scaling)
+        exp_int, exp_scaling = self.int_exp_poly(x_int.float(), scaling_factor)
         
         # Sum for normalization
         exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
         exp_int_sum = torch.clamp(exp_int_sum, min=1)  # Avoid division by zero
         
-        # Normalize to get probabilities
-        # Scale factor to maintain precision
-        max_val = 2 ** (31 - 1) - 1  # Max positive int32
-        factor = torch.floor(max_val / exp_int_sum)
+        # Normalize
+        max_int32 = 2 ** 31 - 1
+        factor = torch.floor(max_int32 / exp_int_sum)
+        factor = torch.clamp(factor, max=2 ** (32 - self.output_bit)) # shouldnt happen?
         
-        # Apply normalization factor
-        normalized_int = torch.floor(exp_int * factor / (2 ** (31 - self.output_bit + 1 )))
+        # Apply normalization
+        # exp_int scaled with 2**N, factor scaled by 2**32/2**N -> 2**N cancles out
+        # divide by 2**32 to remove 2**32 scaling
+        # multiply by 2**output_bit to get proper output scaling
+        normalized_int = torch.floor(exp_int * factor / 2 ** (32 - self.output_bit))
         
         # Final scaling factor for output
-        output_scaling_factor = torch.tensor(1.0 / (2 ** (self.output_bit - 2)), 
-                                           device=x.device, dtype=x.dtype)
+        output_scaling_factor = 1.0 / (2 ** (self.output_bit - 1))
+        output_scaling_factor = torch.tensor(output_scaling_factor, device=device, dtype=x.dtype)
         
         # Store scaling factor
         self.act_scaling_factor = output_scaling_factor
@@ -226,7 +221,6 @@ class IntSoftmax_Piecewise(nn.Module):
         result = normalized_int * output_scaling_factor
         
         return result, output_scaling_factor
-
 # ------------------------------------------------------------------
 # I-ViT Softmax
 # ------------------------------------------------------------------

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # gelu_approx_analysis.py
 # --------------------------------------------------------------
-# Comparison of GELU approximations from I-ViT and I-BERT
+# Comparison of GELU approximations from I-ViT, I-BERT, and Custom Piecewise Polynomial
 # Approximations taken from: 
-# I-BERT: https://github.com/kssteven418/I-BERT/ and 
+# I-BERT: https://github.com/kssteven418/I-BERT/
 # I-ViT: https://github.com/zkkli/I-ViT
+# Custom: Piecewise polynomial approximation
 # Author: Lionnus Kesting (lkesting@ethz.ch)
 # --------------------------------------------------------------
 
@@ -15,6 +16,7 @@ import matplotlib.pyplot as plt
 plt.style.use('scripts/thesis_plot_styles.mplstyle')
 import logging
 import numpy as np
+from scipy.special import erf
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +140,102 @@ class IntGELU_IBERT(nn.Module):
         
         return x_int * scaling_factor, scaling_factor
 
+class IntGELU_Custom(nn.Module):
+    """
+    Custom Integer GELU using piecewise polynomial approximation
+    """
+    def __init__(self, output_bit=8, N=5, segments=16, degree=2):
+        super().__init__()
+        self.output_bit = 16
+        self.N = N
+        self.segments = segments
+        self.degree = degree
+        self.input_range = (-5.0, 5.0)
+        self.gelu_module = nn.GELU()
+        self.float_pieces = self._fit_piecewise_polynomials()
+        self.register_buffer('act_scaling_factor', torch.zeros(1))
+    
+    def _gelu_func(self, x):
+        """Standard GELU function for fitting"""
+        return 0.5 * x * (1 + erf(x / np.sqrt(2)))
+    
+    def _fit_piecewise_polynomials(self):
+        """Fit piecewise polynomials to approximate GELU."""
+        x_lo, x_hi = self.input_range
+        xs = np.linspace(x_lo, x_hi, 10000, dtype=np.float32)
+        ys = self._gelu_func(xs)
+        bounds = np.linspace(x_lo, x_hi, self.segments + 1, dtype=np.float32)
+        
+        pieces = []
+        for lo, hi in zip(bounds[:-1], bounds[1:]):
+            mask = (xs >= lo) & (xs <= hi)
+            coeffs = np.polyfit(xs[mask], ys[mask], self.degree).astype(np.float32)
+            pieces.append(((lo, hi), coeffs))
+        return pieces
+    
+    def forward(self, x, scaling_factor):
+        """Evaluate piecewise polynomial for integer inputs."""
+        
+        # Convert input to integer representation
+        x_int = torch.floor(x / scaling_factor)
+        
+        # Build integer bounds and coefficients
+        with torch.no_grad():
+            s_in = scaling_factor
+            lo_list = []
+            hi_list = []
+            int_coeffs_list = []
+            for (lo_f, hi_f), coeffs in self.float_pieces:
+                lo_i = torch.floor(torch.tensor(lo_f, device=x_int.device) / s_in)
+                hi_i = torch.floor(torch.tensor(hi_f, device=x_int.device) / s_in)
+                lo_list.append(lo_i)
+                hi_list.append(hi_i)
+                deg = len(coeffs) - 1
+                this_int_coeffs = []
+                for i, coeff in enumerate(coeffs):
+                    power = deg - i
+                    scaled = coeff * (s_in ** power) * (2 ** self.N)
+                    this_int_coeffs.append(torch.floor(torch.tensor(scaled, device=x_int.device)))
+                int_coeffs_list.append(torch.stack(this_int_coeffs))
+            lo_i = torch.stack(lo_list)
+            hi_i = torch.stack(hi_list)
+            coeffs_tensor = torch.stack(int_coeffs_list)
+        
+        # Initialize output
+        y_int = torch.zeros_like(x_int, dtype=torch.float32)
+        S = self.segments
+        D = self.degree
+        
+        # Evaluate polynomial
+        with torch.no_grad():
+            for i in range(S):
+                if i == 0:
+                    mask_i = x_int <= hi_i[0]
+                elif i == S - 1:
+                    mask_i = x_int >= lo_i[-1]
+                else:
+                    mask_i = (x_int >= lo_i[i]) & (x_int <= hi_i[i])
+                if not mask_i.any():
+                    continue
+
+                x_seg = x_int[mask_i]
+                c = coeffs_tensor[i]
+                
+                # Horner's rule
+                r = c[0].to(x_seg.dtype)
+                for idx in range(1, D + 1):
+                    r = r * x_seg + c[idx]
+
+                y_int[mask_i] = r
+        
+        # Convert back to float
+        y_float = y_int / (2 ** self.N)
+        scaling_factor_out = scaling_factor / (2 ** self.N)
+        
+        return y_float, scaling_factor_out
+
 # ------------------------------------------------------------------
-# PLot helper function
+# Plot helper function
 # ------------------------------------------------------------------
 
 def new_figure(nrows: int = 1, height_mul: float = 1.0):
@@ -155,10 +251,11 @@ def new_figure(nrows: int = 1, height_mul: float = 1.0):
 
 def run_comparison():
     # 1. Input range & scaling factors -----------------------------
-    full_scale   = 6
+    full_scale   = 40
     bit_width    = 8
     scale_ivit   = full_scale / (2 ** bit_width)
     scale_ibert  = full_scale / (2 ** bit_width)
+    scale_custom = full_scale / (2 ** bit_width)
     x = torch.linspace(-full_scale / 2, full_scale / 2, 2**(bit_width-1)+1)
     y_float = F.gelu(x)
 
@@ -169,11 +266,16 @@ def run_comparison():
     ibert = IntGELU_IBERT(bit_width)
     y_ibert, _ = ibert(x, scaling_factor=torch.tensor(scale_ibert))
 
+    custom = IntGELU_Custom(bit_width, N=20, segments=16, degree=2)
+    y_custom, _ = custom(x, scaling_factor=torch.tensor(scale_custom))
+
     # 3. Errors ------------------------------------------------------
     abs_err_ivit  = (y_ivit  - y_float).abs()
     abs_err_ibert = (y_ibert - y_float).abs()
-    rel_err_ivit  = abs_err_ivit  / (y_float.abs() + 1e-10) * 100.0
-    rel_err_ibert = abs_err_ibert / (y_float.abs() + 1e-10) * 100.0
+    abs_err_custom = (y_custom - y_float).abs()
+    rel_err_ivit  = abs_err_ivit  / torch.clamp(y_float.abs(), min=1e-3) * 100.0
+    rel_err_ibert = abs_err_ibert / torch.clamp(y_float.abs(), min=1e-3) * 100.0
+    rel_err_custom = abs_err_custom / torch.clamp(y_float.abs(), min=1e-3) * 100.0
 
     # 4. Metrics printout -------------------------------------------
     def _stats(name, ae, re):
@@ -184,6 +286,7 @@ def run_comparison():
               f"Mean % error : {re.mean():.2f}%\n")
     _stats("I-ViT IntGELU",  abs_err_ivit,  rel_err_ivit)
     _stats("I-BERT IntGELU", abs_err_ibert, rel_err_ibert)
+    _stats("PP IntGELU", abs_err_custom, rel_err_custom)
 
     # 5. Figure with 4 panels --------------------------------------
     fig, axes = new_figure(nrows=2, height_mul=2) 
@@ -191,33 +294,37 @@ def run_comparison():
     ax21, ax22 = axes[1]
 
     # GELU & approximations
-    ax11.plot(x, y_float, label="Float GELU")
-    ax11.plot(x, y_ivit,  '--', label="I-ViT IntGELU")
-    ax11.plot(x, y_ibert, ':',  label="I-BERT IntGELU")
+    ax11.plot(x, y_float, 'k-', label="Float GELU", linewidth=2)
+    ax11.plot(x, y_ivit,  '--', label="I-ViT IntGELU", linewidth=1.5)
+    ax11.plot(x, y_ibert, ':',  label="I-BERT IntGELU", linewidth=1.5)
+    ax11.plot(x, y_custom, '-.', label="PP IntGELU", linewidth=1.5)
     ax11.set_title("GELU vs Integer Approximations")
     ax11.set_xlabel("Input x")
     ax11.set_ylabel("GELU(x)")
     ax11.legend()
 
     # absolute error
-    ax12.plot(x, abs_err_ivit,  label="I-ViT abs err")
-    ax12.plot(x, abs_err_ibert, label="I-BERT abs err")
+    ax12.plot(x, abs_err_ivit,  label="I-ViT abs err", linewidth=1.5)
+    ax12.plot(x, abs_err_ibert, label="I-BERT abs err", linewidth=1.5)
+    ax12.plot(x, abs_err_custom, label="PP abs err", linewidth=1.5)
     ax12.set_title("Absolute Error")
     ax12.set_xlabel("Input x")
     ax12.set_ylabel("|error|")
     ax12.legend()
 
     # percentage error
-    ax21.plot(x, rel_err_ivit,  label="I-ViT % err")
-    ax21.plot(x, rel_err_ibert, label="I-BERT % err")
+    ax21.plot(x, rel_err_ivit,  label="I-ViT % err", linewidth=1.5)
+    ax21.plot(x, rel_err_ibert, label="I-BERT % err", linewidth=1.5)
+    ax21.plot(x, rel_err_custom, label="PP % err", linewidth=1.5)
     ax21.set_title("Percentage Error")
     ax21.set_xlabel("Input x")
     ax21.set_ylabel("Error (%)")
     ax21.legend()
 
     # log-scale absolute error
-    ax22.semilogy(x, abs_err_ivit,  '--', label="I-ViT abs err")
-    ax22.semilogy(x, abs_err_ibert, ':',  label="I-BERT abs err")
+    ax22.semilogy(x, abs_err_ivit,  '--', label="I-ViT abs err", linewidth=1.5)
+    ax22.semilogy(x, abs_err_ibert, ':',  label="I-BERT abs err", linewidth=1.5)
+    ax22.semilogy(x, abs_err_custom, '-.', label="PP abs err", linewidth=1.5)
     ax22.set_title("Absolute Error (log-scale)")
     ax22.set_xlabel("Input x")
     ax22.set_ylabel("|error|")
@@ -231,22 +338,42 @@ def run_comparison():
     bin_centers = (bins[:-1] + bins[1:]) / 2
     ivit_bin_err  = []
     ibert_bin_err = []
+    custom_bin_err = []
     for i in range(len(bins) - 1):
         mask = (x >= bins[i]) & (x < bins[i + 1])
         if torch.any(mask):
             ivit_bin_err.append(rel_err_ivit[mask].mean().item())
             ibert_bin_err.append(rel_err_ibert[mask].mean().item())
+            custom_bin_err.append(rel_err_custom[mask].mean().item())
         else:
             ivit_bin_err.append(0.0)
             ibert_bin_err.append(0.0)
-    width = 0.35
-    ax.bar(bin_centers - width / 2, ivit_bin_err,  width, label='I-ViT')
-    ax.bar(bin_centers + width / 2, ibert_bin_err, width, label='I-BERT')
+            custom_bin_err.append(0.0)
+    width = 0.25
+    ax.bar(bin_centers - width, ivit_bin_err,  width, label='I-ViT')
+    ax.bar(bin_centers, ibert_bin_err, width, label='I-BERT')
+    ax.bar(bin_centers + width, custom_bin_err, width, label='PP')
     ax.set_xlabel('Input range')
     ax.set_ylabel('Average % error')
     ax.set_title('Error distribution across input range')
     ax.legend()
     fig2.show()
+
+    # 7. Additional visualization: Show piecewise boundaries -------
+    fig3, ax = new_figure()
+    ax.plot(x, y_float, 'k-', label="Float GELU", linewidth=2)
+    ax.plot(x, y_custom, 'r-', label="PP Piecewise Poly", linewidth=1.5, alpha=0.8)
+    
+    # Mark segment boundaries
+    bounds = np.linspace(-full_scale / 2, full_scale / 2, custom.segments + 1)
+    for b in bounds[1:-1]:
+        ax.axvline(x=b, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+    
+    ax.legend()
+    ax.set_title(f"Piecewise Polynomial GELU (segments={custom.segments}, degree={custom.degree})")
+    ax.set_xlabel("Input x")
+    ax.set_ylabel("GELU(x)")
+    fig3.show()
 
 
 if __name__ == "__main__":
