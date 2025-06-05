@@ -7,6 +7,7 @@ import torch.nn as nn
 import numpy as np
 from scipy.special import erf
 from .quant_utils import floor_ste
+from .ibert_modules import IBERTIntGELU
 
 class ICUSTOMIntGELU(nn.Module):
     """
@@ -14,21 +15,23 @@ class ICUSTOMIntGELU(nn.Module):
     Uses float GELU for gradient computation to avoid OOM issues
     """
     
-    def __init__(self, output_bit=8, N=24, segments=16, degree=1):
+    def __init__(self, output_bit=8, N=24, segments=16, degree=1, ibert_patch=True):
         super(ICUSTOMIntGELU, self).__init__()
         self.output_bit = 16  # ignore for now, handled in quantAct after?
         self.N = N  # Bit shift for integer representation
         self.segments = segments
         self.degree = degree
-        
-        # GELU approx range
-        self.input_range = (-5.0, 5.0)
+        self.ibert_patch = ibert_patch
 
         # Torch module for float gelu backward pass
         self.gelu_module = nn.GELU()
-        
-        # Fit the piecewise polynomials once during initialization
-        self.float_pieces = self._fit_piecewise_polynomials()
+        if not self.ibert_patch:
+            # GELU approx range
+            self.input_range = (-5.0, 5.0)
+            # Fit the piecewise polynomials once during initialization
+            self.float_pieces = self._fit_piecewise_polynomials()
+        else:
+            self.float_pieces = None  # Placeholder, will be set in forward pass if ibert_patch is True
         
         self.register_buffer('act_scaling_factor', torch.zeros(1))
     
@@ -36,11 +39,24 @@ class ICUSTOMIntGELU(nn.Module):
         """Standard GELU function for fitting"""
         return 0.5 * x * (1 + erf(x / np.sqrt(2)))
     
-    def _fit_piecewise_polynomials(self):
+    def _fit_piecewise_polynomials(self, x= None, scaling_factor=None, ibert_patch=False):
         """Fit piecewise polynomials to approximate GELU."""
-        x_lo, x_hi = self.input_range
+        if ibert_patch and x is not None and scaling_factor is not None:
+            # Use provided x and scaling_factor for fitting
+            x_lo = torch.floor(torch.min(x) / scaling_factor).item()
+            x_hi = torch.ceil(torch.max(x) / scaling_factor).item()
+            self.input_range = (x_lo, x_hi)
+        else:
+            # Use default input range
+            x_lo, x_hi = self.input_range
+
         xs = np.linspace(x_lo, x_hi, 10000, dtype=np.float32)
-        ys = self._gelu_func(xs)
+        # GOlden model
+        if ibert_patch:
+            ibert = IBERTIntGELU()
+            ys, scaling_factor_ibert = ibert(torch.Tensor(xs, device=scaling_factor.device), scaling_factor)
+        else:
+            ys = self._gelu_func(xs)
         bounds = np.linspace(x_lo, x_hi, self.segments + 1, dtype=np.float32)
         
         pieces = []
@@ -48,7 +64,11 @@ class ICUSTOMIntGELU(nn.Module):
             mask = (xs >= lo) & (xs <= hi)
             coeffs = np.polyfit(xs[mask], ys[mask], self.degree).astype(np.float32)
             pieces.append(((lo, hi), coeffs))
-        return pieces
+        if ibert_patch:
+            # If using IBERT patch, return the pieces and scaling factor
+            return pieces, scaling_factor_ibert
+        else:
+            return pieces
     
     def fix(self):
         pass
@@ -61,6 +81,10 @@ class ICUSTOMIntGELU(nn.Module):
         
         # Convert input to integer representation
         x_int = floor_ste.apply(x / scaling_factor)
+        
+        if self.ibert_patch:
+            # Use IBERT patch for GELU approximation
+            self.float_pieces, scaling_factor_ibert = self._fit_piecewise_polynomials(x_int, scaling_factor, ibert_patch=True)
         
         # Build integer bounds and integer coefficients with torch.no_grad
         # to avoid building gradient graph for the polynomial fitting
@@ -123,10 +147,14 @@ class ICUSTOMIntGELU(nn.Module):
         # replaces the forward pass with integer computation but uses float GELU derivatives for backprop
         y_float = y_float.detach() + (y_float_gelu - y_float_gelu.detach())
 
-        scaling_factor_out = scaling_factor / (2 ** self.N)
+        if self.ibert_patch:
+            # If using IBERT patch, return the scaling factor from IBERT
+            scaling_factor_out = scaling_factor_ibert
+        else:   
+            scaling_factor_out = scaling_factor / (2 ** self.N)
 
         return y_float, scaling_factor_out
-    
+
 class ICUSTOMIntSoftmax(nn.Module):
     """
     Implementation of Integer Softmax using piecewise polynomial approximation for exp()

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # softmax_approx_analysis.py
 # --------------------------------------------------------------
-# Comparison of the softmax approximations of I-ViT and I-BERT
+# Comparison of the softmax approximations of I-ViT, I-BERT, and Piecewise Polynomial
 # Approximations taken from: 
 # I-BERT: https://github.com/kssteven418/I-BERT/ and 
 # I-ViT: https://github.com/zkkli/I-ViT
+# Piecewise Polynomial: Custom implementation
 # Author: Lionnus Kesting (lkesting@ethz.ch)
 # --------------------------------------------------------------
 
@@ -63,7 +64,168 @@ class QuantAct:
 
         return quant_act_int * correct_output_scale, scale
 
+# ------------------------------------------------------------------
+# Piecewise Polynomial Softmax
+# ------------------------------------------------------------------
+class IntSoftmax_Piecewise(nn.Module):
+    """
+    Implementation of Integer Softmax using piecewise polynomial approximation for exp()
+    """
+    
+    def __init__(self, output_bit=8, N=20, segments=32, degree=2):
+        super().__init__()
+        self.output_bit = output_bit
+        self.N = N  # Bit shift for integer representation
+        self.segments = segments
+        self.degree = degree
+        
+        # Exponential approximation range (typical softmax input range after max subtraction)
+        # After subtracting max, inputs are typically in range [-10, 0] or similar
+        self.input_range = (-10.0, 0.0)
+        
+        # Fit the piecewise polynomials once during initialization
+        self.float_pieces = self._fit_piecewise_polynomials()
+        
+        self.register_buffer('act_scaling_factor', torch.zeros(1))
+    
+    def _exp_func(self, x):
+        """Standard exponential function for fitting"""
+        return np.exp(x) + 1e-10  # Clip to avoid overflow/underflow?
+    
+    def _fit_piecewise_polynomials(self):
+        """Fit piecewise polynomials to approximate exp(x)."""
+        x_lo, x_hi = self.input_range
+        xs = np.linspace(x_lo, x_hi, 10000, dtype=np.float32)
+        ys = self._exp_func(xs)
+        bounds = np.linspace(x_lo, x_hi, self.segments + 1, dtype=np.float32)
+        
+        pieces = []
+        for lo, hi in zip(bounds[:-1], bounds[1:]):
+            mask = (xs >= lo) & (xs <= hi)
+            if np.sum(mask) < self.degree + 1:
+                # Not enough points for fitting, use neighboring points
+                center = (lo + hi) / 2
+                distances = np.abs(xs - center)
+                indices = np.argsort(distances)[:max(self.degree + 1, 10)]
+                x_fit = xs[indices]
+                y_fit = ys[indices]
+            else:
+                x_fit = xs[mask]
+                y_fit = ys[mask]
+            
+            coeffs = np.polyfit(x_fit, y_fit, self.degree).astype(np.float32)
+            pieces.append(((lo, hi), coeffs))
+        return pieces
+    
+    def int_exp_poly(self, x_int, scaling_factor):
+        """Evaluate piecewise polynomial for exponential approximation."""
+        
+        # Build integer bounds and integer coefficients under torch.no_grad
+        with torch.no_grad():
+            s_in = scaling_factor
+            lo_list = []
+            hi_list = []
+            int_coeffs_list = []
+            
+            for (lo_f, hi_f), coeffs in self.float_pieces:
+                lo_i = torch.floor(torch.tensor(lo_f, device=x_int.device) / s_in)
+                hi_i = torch.floor(torch.tensor(hi_f, device=x_int.device) / s_in)
+                lo_list.append(lo_i)
+                hi_list.append(hi_i)
+                
+                # Convert float coeffs → integer coeffs
+                deg = len(coeffs) - 1
+                this_int_coeffs = []
+                for i, coeff in enumerate(coeffs):
+                    power = deg - i
+                    scaled = coeff * (s_in ** power) * (2 ** self.N)
+                    this_int_coeffs.append(torch.floor(torch.tensor(scaled, device=x_int.device)))
+                int_coeffs_list.append(torch.stack(this_int_coeffs))
+                
+            lo_i = torch.stack(lo_list)          # (segments,)
+            hi_i = torch.stack(hi_list)          # (segments,)
+            coeffs_tensor = torch.stack(int_coeffs_list)  # (segments, degree+1)
+        
+        # Initialize output
+        exp_int = torch.zeros_like(x_int, dtype=torch.float32)
+        S = self.segments
+        D = self.degree
+        
+        # Evaluate polynomial without building gradient graph
+        with torch.no_grad():
+            for i in range(S):
+                if i == 0:
+                    mask_i = x_int <= hi_i[0]
+                elif i == S - 1:
+                    mask_i = x_int >= lo_i[-1]
+                else:
+                    mask_i = (x_int >= lo_i[i]) & (x_int <= hi_i[i])
+                    
+                if not mask_i.any():
+                    continue
 
+                x_seg = x_int[mask_i]
+                c = coeffs_tensor[i]
+                
+                # Horner's rule
+                r = c[0].to(x_seg.dtype)
+                for idx in range(1, D + 1):
+                    r = r * x_seg + c[idx]
+                
+                exp_int[mask_i] = r
+        
+        exp_int = exp_int.detach()
+        
+        # Convert integer result back to float
+        exp_float = exp_int / (2 ** self.N)
+        scaling_factor_out = scaling_factor / (2 ** self.N)
+        
+        # Ensure non-negative (exp should always be positive)
+        exp_float = torch.clamp(exp_float, min=1e-10)
+        
+        return exp_float, scaling_factor_out
+    
+    def forward(self, x, scaling_factor):
+        """Forward pass implementing integer softmax with polynomial exp approximation."""
+        
+        # Convert to integer representation
+
+        x_int = torch.floor(x / scaling_factor)
+        
+        # Subtract max for numerical stability (standard softmax trick)
+        with torch.no_grad():
+            x_int_max, _ = x_int.max(dim=-1, keepdim=True)
+        x_int = x_int - x_int_max
+        
+        # Apply polynomial exponential approximation
+        exp_result, exp_scaling = self.int_exp_poly(x_int, scaling_factor)
+        
+        # Convert back to integer for summation
+        exp_int = torch.floor(exp_result / exp_scaling)
+        
+        # Sum for normalization
+        exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
+        exp_int_sum = torch.clamp(exp_int_sum, min=1)  # Avoid division by zero
+        
+        # Normalize to get probabilities
+        # Scale factor to maintain precision
+        max_val = 2 ** (31 - 1) - 1  # Max positive int32
+        factor = torch.floor(max_val / exp_int_sum)
+        
+        # Apply normalization factor
+        normalized_int = torch.floor(exp_int * factor / (2 ** (31 - self.output_bit + 1 )))
+        
+        # Final scaling factor for output
+        output_scaling_factor = torch.tensor(1.0 / (2 ** (self.output_bit - 2)), 
+                                           device=x.device, dtype=x.dtype)
+        
+        # Store scaling factor
+        self.act_scaling_factor = output_scaling_factor
+        
+        # Return final result
+        result = normalized_int * output_scaling_factor
+        
+        return result, output_scaling_factor
 
 # ------------------------------------------------------------------
 # I-ViT Softmax
@@ -217,7 +379,7 @@ class IntSoftmax_IBERT(nn.Module):
 
         # 3) integer exp, then a fake-quant (QuantAct)
         exp_int, exp_scale = self.int_exp(x_int, scaling_factor)
-        exp_q, exp_scale = self.act(exp_int, exp_scale)  # identity in stub
+        exp_q, exp_scale = self.act(exp_int, exp_scale)
         exp_int = exp_q / exp_scale
 
         # 4) denominator
@@ -248,7 +410,7 @@ def print_stats(name: str, err: torch.Tensor):
 # ------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare IntSoftmax_IVIT / IBERT to float softmax.\n"
+        description="Compare IntSoftmax_IVIT / IBERT / Piecewise to float softmax.\n"
         "If --x-file / --scale-file are provided, the script uses real "
         "tensors captured during debugging; otherwise it falls back to a "
         "synthetic sweep."
@@ -281,7 +443,7 @@ def main():
     if args.x_file and args.x_file.exists() and args.scale_file and args.scale_file.exists():
         x_np = np.loadtxt(args.x_file, dtype=np.float32)
         scale_value = float(np.loadtxt(args.scale_file))
-        scale_ivit = scale_ibert = scale_value
+        scale_ivit = scale_ibert = scale_piecewise = scale_value
 
         if args.shape is None:
             raise ValueError(
@@ -308,12 +470,14 @@ def main():
     # ----------------------------------------------------------
     ivit = IntSoftmax_IVIT(output_bit=args.output_bit)
     ibert = IntSoftmax_IBERT(output_bit=args.output_bit, quant_mode="symmetric")
-
+    piecewise = IntSoftmax_Piecewise(output_bit=args.output_bit)
     y_ivit, scaling_ivit_out = ivit(x, scaling_factor=torch.tensor(scale_ivit))
     y_ibert, scaling_ibert_out = ibert(x, scaling_factor=torch.tensor(scale_ibert))
+    y_piecewise, scaling_piecewise_out = piecewise(x, scaling_factor=torch.tensor(scale_piecewise))
     
     abs_err_ivit = (y_ivit - y_float).abs()
     abs_err_ibert = (y_ibert - y_float).abs()
+    abs_err_piecewise = (y_piecewise - y_float).abs()
     
     # ----------------------------------------------------------
     # 4.  Visualization and error analysis
@@ -321,6 +485,7 @@ def main():
     # 4.1 Print existing error‐stats
     print_stats("I-ViT IntSoftmax", abs_err_ivit)
     print_stats("I-BERT IntSoftmax", abs_err_ibert)
+    print_stats("Piecewise IntSoftmax", abs_err_piecewise)
 
         
     # 4.2 Bar chart: random row
@@ -328,12 +493,14 @@ def main():
     true_row  = y_float [sel].cpu().numpy()
     ivit_row  = y_ivit  [sel].cpu().numpy()
     ibert_row = y_ibert [sel].cpu().numpy()
+    piecewise_row = y_piecewise [sel].cpu().numpy()
 
     classes = np.arange(true_row.size)
     # plt.figure(figsize=(7, 4))
-    plt.bar(classes - 0.2, true_row,  width=0.2, label="float")
-    plt.bar(classes      , ivit_row,  width=0.2, label="IViT")
-    plt.bar(classes + 0.2, ibert_row, width=0.2, label="IBERT")
+    plt.bar(classes - 0.3, true_row,  width=0.2, label="float")
+    plt.bar(classes - 0.1, ivit_row,  width=0.2, label="IViT")
+    plt.bar(classes + 0.1, ibert_row, width=0.2, label="IBERT")
+    plt.bar(classes + 0.3, piecewise_row, width=0.2, label="Piecewise")
     plt.title(f"Softmax for sample {sel}")
     plt.xlabel("class index"); plt.ylabel("probability")
     plt.legend(); plt.grid(True); plt.show()
@@ -342,7 +509,9 @@ def main():
     flat_true  = y_float .view(-1).cpu().numpy()
     flat_ivit  = y_ivit  .view(-1).cpu().numpy()
     flat_ibert = y_ibert .view(-1).cpu().numpy()
-
+    flat_piecewise = y_piecewise .view(-1).cpu().numpy()
+    plt.figure(figsize=(12, 4))
+    
     keep = slice(None, None, 20)   # keep every n-th point/downsample
     plt.scatter(flat_true[keep], flat_ivit [keep],
             s=3, alpha=0.9, marker='.', linewidths=0,
@@ -350,6 +519,9 @@ def main():
     plt.scatter(flat_true[keep], flat_ibert[keep],
                 s=3, alpha=0.9, marker='.', linewidths=0,
                 label="I-BERT")
+    plt.scatter(flat_true[keep], flat_piecewise[keep],
+                s=3, alpha=0.9, marker='.', linewidths=0,
+                label="Piecewise")
     plt.plot([0, 1], [0, 1], 'k--', linewidth=0.7)
     plt.title("Float vs Integer Softmax (128 batch size, 197 model dim)") # TODO: change title duynamically
     plt.xlabel("Float Softmax"); plt.ylabel("IntSoftmax")
@@ -364,26 +536,97 @@ def main():
     plt.show()
 
     
-    # 4.3 Density plot with hexbin -> Takes a long time to compute
-    # plt.hexbin(flat_true, flat_ivit, gridsize=60, cmap='Blues', mincnt=1, linewidths=0.2, alpha=0.9)
-    # plt.hexbin(flat_true, flat_ibert, gridsize=60, cmap='Oranges', mincnt=1, linewidths=0.2, alpha=0.6)
-    # plt.plot([0, 1], [0, 1], 'k--', linewidth=0.7)
-    # plt.title("Float vs Integer Softmax - density view")
-    # plt.xlabel("Float Softmax"); plt.ylabel("IntSoftmax")
-    # cb = plt.colorbar(label="count per bin")
-    # plt.grid(True); plt.tight_layout()
-    # plt.show()
     # 4.4 Histogram of absolute errors
     err_ivit_vals  = abs_err_ivit .view(-1).cpu().numpy()
     err_ibert_vals = abs_err_ibert.view(-1).cpu().numpy()
+    err_piecewise_vals = abs_err_piecewise.view(-1).cpu().numpy()
     # plt.figure(figsize=(6,4))
     plt.hist(err_ivit_vals,  bins=50, density=True, alpha=0.5, label="I-ViT")
     plt.hist(err_ibert_vals, bins=50, density=True, alpha=0.5, label="I-BERT")
+    plt.hist(err_piecewise_vals, bins=50, density=True, alpha=0.5, label="Piecewise")
     plt.title("Distribution of |error|")
     plt.xlabel("absolute error")
     plt.ylabel("density")
     plt.legend(); plt.grid(True)
     plt.show()
+    
+    # # 4.5 Integer value comparison (input vs output)
+    # # Convert inputs to integer representation
+    x_int_input = torch.floor(x / torch.tensor(scale_value)).to(torch.int32)
+    
+    # Convert outputs to integer representation
+    y_ivit_int = torch.floor(y_ivit / scaling_ivit_out).to(torch.int32)
+    y_ibert_int = torch.floor(y_ibert / scaling_ibert_out).to(torch.int32)
+    y_piecewise_int = torch.floor(y_piecewise / scaling_piecewise_out).to(torch.int32)
+    
+    # Select a sample for visualization
+    sel_int = (0, 0, 0)  # (batch, head, token)
+    
+    # Plot integer input range
+    plt.figure(figsize=(12, 4))
+    
+    plt.subplot(1, 3, 1)
+    x_int_flat = x_int_input[sel_int].cpu().numpy()
+    plt.hist(x_int_flat, bins=50, alpha=0.7, color='blue', edgecolor='black')
+    plt.title(f"Integer Input Distribution\n(sample {sel_int})")
+    plt.xlabel("Integer value")
+    plt.ylabel("Count")
+    plt.axvline(x=-128, color='red', linestyle='--', alpha=0.5, label='8-bit range')
+    plt.axvline(x=127, color='red', linestyle='--', alpha=0.5)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Plot integer output distributions for each method
+    plt.subplot(1, 3, 2)
+    methods = ['I-ViT', 'I-BERT', 'Piecewise']
+    int_outputs = [y_ivit_int[sel_int].cpu().numpy(), 
+                   y_ibert_int[sel_int].cpu().numpy(),
+                   y_piecewise_int[sel_int].cpu().numpy()]
+    colors = ['orange', 'green', 'purple']
+    
+    for method, output, color in zip(methods, int_outputs, colors):
+        plt.hist(output, bins=30, alpha=0.5, label=method, color=color, edgecolor='black')
+    
+    plt.title(f"Integer Output Distribution\n(sample {sel_int})")
+    plt.xlabel("Integer value")
+    plt.ylabel("Count")
+    plt.axvline(x=-128, color='red', linestyle='--', alpha=0.5, label='8-bit range')
+    plt.axvline(x=127, color='red', linestyle='--', alpha=0.5)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Plot input vs output integer values scatter
+    plt.subplot(1, 3, 3)
+    # Take a subset of points for clarity
+    n_points = min(100, x_int_flat.size)
+    indices = np.random.choice(x_int_flat.size, n_points, replace=False)
+    
+    x_subset = x_int_flat[indices]
+    for method, output, color in zip(methods, int_outputs, colors):
+        y_subset = output[indices]
+        plt.scatter(x_subset, y_subset, alpha=0.6, s=20, label=method, color=color)
+    
+    plt.title(f"Integer Input vs Output\n(sample {sel_int}, {n_points} points)")
+    plt.xlabel("Input integer value")
+    plt.ylabel("Output integer value")
+    plt.axhline(y=-128, color='red', linestyle='--', alpha=0.3)
+    plt.axhline(y=127, color='red', linestyle='--', alpha=0.3)
+    plt.axvline(x=-128, color='red', linestyle='--', alpha=0.3)
+    plt.axvline(x=127, color='red', linestyle='--', alpha=0.3)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print integer value statistics
+    print("\n--- Integer Value Statistics ---")
+    print(f"Input integer range: [{x_int_input.min().item()}, {x_int_input.max().item()}]")
+    print(f"Input scaling factor: {scale_value}")
+    print(f"\nOutput integer ranges:")
+    print(f"  I-ViT:     [{y_ivit_int.min().item()}, {y_ivit_int.max().item()}] (scaling: {scaling_ivit_out.item():.6f})")
+    print(f"  I-BERT:    [{y_ibert_int.min().item()}, {y_ibert_int.max().item()}] (scaling: {scaling_ibert_out.item():.6f})")
+    print(f"  Piecewise: [{y_piecewise_int.min().item()}, {y_piecewise_int.max().item()}] (scaling: {scaling_piecewise_out.item():.6f})")
 
 if __name__ == "__main__":
     main()
