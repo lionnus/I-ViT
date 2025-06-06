@@ -159,11 +159,16 @@ class ICUSTOMIntGELU(nn.Module):
             k = 1.4142
             n = 6 # sufficiently large integer
             coeff = [-0.2888, -1.769, 1]
-            scaling_factor = scaling_factor/k
-            scaling_factor = scaling_factor ** 2 / coeff[0]
-            scaling_factor_out = scaling_factor * (2**n)
+            scaling_factor_out = scaling_factor/k
+            scaling_factor_out = scaling_factor_out ** 2 / coeff[0]
+            scaling_factor_out = scaling_factor_out * (2**n)
+            scaling_factor_out = scaling_factor * scaling_factor_out / 2
+            scaling_factor_out = -scaling_factor_out # For some reason it inverts
         else:   
             scaling_factor_out = scaling_factor / (2 ** self.N)
+        
+        # Make sure y_float/scaling_factor_out is integer
+        y_float = scaling_factor_out * floor_ste.apply(y_float/scaling_factor_out)
 
         return y_float, scaling_factor_out
 
@@ -172,7 +177,7 @@ class ICUSTOMIntSoftmax(nn.Module):
     Implementation of Integer Softmax using piecewise polynomial approximation for exp()
     """
     
-    def __init__(self, output_bit=8, N=24, segments=16, degree=2):
+    def __init__(self, output_bit=16, N=24, segments=16, degree=2):
         super().__init__()
         self.output_bit = output_bit
         self.N = N  # Bit shift for integer representation
@@ -184,8 +189,6 @@ class ICUSTOMIntSoftmax(nn.Module):
         
         # Fit the piecewise polynomials once during initialization
         self.float_pieces = self._fit_piecewise_polynomials()
-        
-        # self.register_buffer('act_scaling_factor', torch.zeros(1))
     
     def _exp_func(self, x):
         """Standard exponential function for fitting"""
