@@ -94,8 +94,8 @@ parser.add_argument('--lr-noise-std', type=float, default=1.0, metavar='STDDEV',
                     help='learning rate noise std-dev (default: 1.0)')
 parser.add_argument('--warmup-lr', type=float, default=1e-6, metavar='LR',
                     help='warmup learning rate (default: 1e-6)')
-parser.add_argument('--min-lr', type=float, default=5e-7, metavar='LR',
-                    help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
+parser.add_argument('--min-lr', type=float, default=1e-7, metavar='LR',
+                    help='lower lr bound for cyclic schedulers that hit 0 (1e-7)')
 
 parser.add_argument('--decay-epochs', type=float, default=30, metavar='N',
                     help='epoch interval to decay LR')
@@ -146,10 +146,10 @@ parser.add_argument('--best-acc1', type=float, default=0, help='best_acc1')
 
 # Quantization control params
 parser.add_argument(
-    '--bitwidth',                # NEW helper
+    '--bitwidth',
     default=None,
-    type=str,                    # accept "8"  OR  "8,8,8,8,8,8,8"
-    help='Single bit-width or comma-separated list of 7 bit-widths for the respective locations: \
+    type=str,                    # accept "8"  OR  "8,8,8,8,8,8,8,8"
+    help='Single bit-width or comma-separated list of 8 bit-widths for the respective locations: \
     patchembed, pos enc, attention out, softmax out, mlp out, norm 2 in, attention block out.'
 )
 parser.add_argument('--gelu',      default='ibert', 
@@ -165,6 +165,12 @@ parser.add_argument(
     default=None,
     help='If set, use this implementation for GELU, Softmax, and LayerNorm. Overrides --gelu, --softmax, and --layernorm.'
 )
+
+# Calibration parameters
+parser.add_argument('--calibration-batches', type=int, default=100,
+                    help='Number of batches to use for calibration (default: 5)')
+parser.add_argument('--calibration-epochs', type=int, default=0,
+                    help='If 0 no calibration, else the number of epochs after which the model is unfixed.')
 
 # Weights & Biases logging
 parser.add_argument('--wandb-project', type=str, default='i-vit',
@@ -187,6 +193,52 @@ def str2model(name):
     print('Model: %s' % d[name].__name__)
     return d[name]
 
+def calibrate_model(model, train_loader, num_batches=100, device='cuda'):
+    """
+    Calibrate quantization parameters by running inference on training data.
+    This helps establish proper scaling factors before training begins.
+    """
+    model.eval()
+    logging.info(f"Starting calibration with {num_batches} batches...")
+    
+    # Collect initial statistics
+    initial_stats = {}
+    for name, module in model.named_modules():
+        if hasattr(module, 'act_scaling_factor'):
+            initial_stats[name] = {
+                'scale': module.act_scaling_factor.clone()
+            }
+            # QuantAct has x_min/x_max, QuantMatMul doesn't
+            if hasattr(module, 'x_min'):
+                initial_stats[name]['x_min'] = module.x_min.clone()
+                initial_stats[name]['x_max'] = module.x_max.clone()
+    
+    with torch.no_grad():
+        for i, (data, _) in enumerate(train_loader):
+            if i >= num_batches:
+                break
+            data = data.to(device, non_blocking=True)
+            _ = model(data)
+            
+            if (i + 1) % 20 == 0:
+                logging.info(f"Calibration progress: {i + 1}/{num_batches} batches")
+    
+    # Log the changes in scaling factors
+    logging.info("Calibration completed. Scaling factor changes:")
+    for name, module in model.named_modules():
+        if hasattr(module, 'act_scaling_factor') and name in initial_stats:
+            old_scale = initial_stats[name]['scale'].item()
+            new_scale = module.act_scaling_factor.item()
+            if abs(old_scale - new_scale) > 1e-6:
+                logging.info(f"{name}: scale {old_scale:.6f} -> {new_scale:.6f}")
+    
+    # Fix ranges for first few steps/epochs
+    for module in model.modules():
+        if hasattr(module, 'fix'):
+            module.fix()
+    
+    # Unfix after few epochs in the main training loop
+    return model
 
 def main():
     args = parser.parse_args()
@@ -230,15 +282,15 @@ def main():
     
     # Unpack model config for bitwidths
     # Default bitwidths
-    default_bitwidths = [8, 8, 8, 8, 8, 8, 8]
+    default_bitwidths = [8, 8, 8, 8, 8, 8, 8, 8]  # patch_embed, pos_encoding, block_input, attention_out, softmax_out, mlp_out, norm2_in, att_block_out
     
     if args.bitwidth is not None:
-        # turn "8,8,8,8,8,8,8" into [8,8,8,8,8,8,8]
+        # turn "8,8,8,8,8,8,8,8" into [8,8,8,8,8,8,8,8]
         bw_list = [int(x) for x in args.bitwidth.replace(',', ' ').split()]
         if len(bw_list) == 1:
-            bw_list *= 7
-        if len(bw_list) != 7:
-            raise ValueError('--bitwidth must be 1 or 7 values')
+            bw_list *= 8
+        if len(bw_list) != 8:
+            raise ValueError('--bitwidth must be 1 or 8 values')
         args.quant_bitwidths = bw_list
     else:
         args.quant_bitwidths = default_bitwidths
@@ -246,6 +298,7 @@ def main():
     (
         patch_embed_bw,
         pos_encoding_bw,
+        block_input_bw,
         attention_out_bw,
         softmax_bw,
         mlp_out_bw,
@@ -267,6 +320,7 @@ def main():
         drop_path_rate=args.drop_path,
         patch_embed_bw=patch_embed_bw,
         pos_encoding_bw=pos_encoding_bw,
+        block_input_bw=block_input_bw,
         attention_out_bw=attention_out_bw,
         softmax_bw=softmax_bw,
         mlp_out_bw=mlp_out_bw,
@@ -278,7 +332,12 @@ def main():
     )
 
     model.to(device)
-
+    
+    # Perform calibration before setting up training
+    if args.calibration_epochs > 0:
+        model = calibrate_model(model, train_loader, 
+                              num_batches=args.calibration_batches, 
+                              device=device)
     # Weights & Biases init
     if not args.no_wandb:
         wandb.init(
@@ -291,6 +350,7 @@ def main():
         wandb.config.update({
             'patch_embed_bw': patch_embed_bw,
             'pos_encoding_bw': pos_encoding_bw,
+            'block_input_bw': block_input_bw,
             'attention_out_bw': attention_out_bw,
             'softmax_bw': softmax_bw,
             'mlp_out_bw': mlp_out_bw,
@@ -298,7 +358,8 @@ def main():
             'att_block_out_bw': att_block_out_bw,
             'gelu_type': args.layer_type or args.gelu,
             'softmax_type': args.layer_type or args.softmax,
-            'layernorm_type': args.layer_type or args.layernorm
+            'layernorm_type': args.layer_type or args.layernorm,
+            'calibration_batches': args.calibration_batches
         }, allow_val_change=True)
         wandb.watch(model, log='gradients', log_freq=100)
 
@@ -350,6 +411,13 @@ def main():
     
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start_time = time.time()
+        
+        # Unfix quantization parameters after first epoch
+        if epoch == args.calibration_epochs:
+            logging.info(f"Unfixing quantization parameters at epoch {epoch}")
+            for module in model.modules():
+                if hasattr(module, 'unfix'):
+                    module.unfix()
         
         # train for one epoch
         train_loss = train(args, train_loader, model, criterion, optimizer, epoch,
@@ -410,6 +478,7 @@ def main():
                 'quant_bitwidths': args.quant_bitwidths,
                 'patch_embed_bw': patch_embed_bw,
                 'pos_encoding_bw': pos_encoding_bw,
+                'block_input_bw': block_input_bw,
                 'attention_out_bw': attention_out_bw,
                 'softmax_bw': softmax_bw,
                 'mlp_out_bw': mlp_out_bw,
@@ -486,7 +555,7 @@ def train(args, train_loader, model, criterion, optimizer, epoch, loss_scaler, m
                     'train_loss': losses.val,
                     'epoch': epoch
                 })
-
+                
     # return avg loss for epoch 
     return losses.avg
 

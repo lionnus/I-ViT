@@ -179,6 +179,7 @@ class VisionTransformer(nn.Module):
             drop_path_rate=0.0,
             patch_embed_bw=8,
             pos_encoding_bw=8,
+            block_input_bw=8,
             attention_out_bw=8,
             softmax_bw=8,
             mlp_out_bw=8,
@@ -215,7 +216,7 @@ class VisionTransformer(nn.Module):
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         self.qact_pos = QuantAct(pos_encoding_bw)
-        self.qact1 = QuantAct(pos_encoding_bw)
+        self.qact1 = QuantAct(block_input_bw)
 
         dpr = [
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
@@ -268,7 +269,6 @@ class VisionTransformer(nn.Module):
             if num_classes > 0
             else nn.Identity()
         )
-        self.act_out = QuantAct()
         trunc_normal_(self.pos_embed, std=0.02)
         trunc_normal_(self.cls_token, std=0.02)
         self.apply(self._init_weights)
@@ -309,7 +309,6 @@ class VisionTransformer(nn.Module):
     def forward(self, x):
         x, act_scaling_factor = self.forward_features(x)
         x, act_scaling_factor = self.head(x, act_scaling_factor)
-        #x, _ = self.act_out(x, act_scaling_factor)
         return x
 
 
