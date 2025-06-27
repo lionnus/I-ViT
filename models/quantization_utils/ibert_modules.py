@@ -31,13 +31,15 @@ class IBERTIntLayerNorm(nn.Module):
                  quant_mode='symmetric',
                  force_dequant='none',
                  elementwise_affine=True,
-                 eps=1e-5):
+                 eps=1e-5,
+                 use_int_sqrt=False):
         super(IBERTIntLayerNorm, self).__init__()
         self.quant_mode = quant_mode
         if force_dequant in ['nonlinear', 'layernorm']:
             logging.log("Force dequantize layernorm")
             self.quant_mode = 'none'
         self.overflow_handling = overflow_handling
+        self.use_int_sqrt = use_int_sqrt
         self.register_buffer('shift', torch.zeros(1))
         self.output_bit = output_bit
         self.dim_sqrt = None
@@ -71,8 +73,7 @@ class IBERTIntLayerNorm(nn.Module):
             shift = (torch.log2(torch.sqrt(var_int / 2**32)).ceil()).max()
             shift_old = self.shift
             self.shift = torch.max(self.shift, shift)
-            logging.log("Dynamic shift adjustment: {} -> {}".format(
-                int(shift_old), int(self.shift)))
+            logging.info("Dynamic shift adjustment: {} -> {}".format(int(shift_old), int(self.shift)))
 
     def overflow_fallback(self, y_int):
         self.set_shift(y_int)
@@ -138,7 +139,10 @@ class IBERTIntLayerNorm(nn.Module):
                 var_int = self.overflow_fallback(y_int)
                 assert var_int.max() < 2**32
         
-        std_int = floor_ste.apply(self.integer_sqrt(var_int)) * 2 ** self.shift 
+        if self.use_int_sqrt:
+            std_int = floor_ste.apply(self.integer_sqrt(var_int)) * 2 ** self.shift
+        else:
+            std_int = floor_ste.apply(torch.sqrt(var_int.float())) * 2 ** self.shift
         factor = floor_ste.apply(2**31 / std_int)
         y_int = floor_ste.apply(y_int * factor / 2)
         scaling_factor = self.dim_sqrt / 2**30
@@ -255,7 +259,7 @@ class IBERTIntSoftmax(nn.Module):
             self.quant_mode = 'none'
 
 
-        self.act = QuantAct(16, quant_mode=self.quant_mode) # TODO: change 16bit(internal, might not be needed)
+        self.act = QuantAct(16, quant_mode=self.quant_mode)
         self.x0 = -0.6931 # -ln2
         self.n = 30 # sufficiently large integer
         self.coef = [0.35815147, 0.96963238, 1.] # ax**2 + bx + c
@@ -302,7 +306,6 @@ class IBERTIntSoftmax(nn.Module):
         x_int_max, _ = x_int.max(dim=-1, keepdim=True)
         x_int = x_int - x_int_max
 
-
         exp_int, exp_scaling_factor = self.int_exp(x_int, scaling_factor)
         exp, exp_scaling_factor = self.act(exp_int, exp_scaling_factor)
         exp_int = exp / exp_scaling_factor
@@ -312,4 +315,5 @@ class IBERTIntSoftmax(nn.Module):
         exp_int = floor_ste.apply(exp_int * factor / 2 ** (32 - self.output_bit + 1))
         # scaling_factor = 1 / 2 ** self.output_bit / 2 # TODO Integrate /2-> now fixing the output to 16 bit signed, instead of 16 bit unsigned.
         scaling_factor = torch.Tensor([2 / 2 ** (self.output_bit)]).cuda(device=x.device)
+
         return exp_int * scaling_factor, scaling_factor
