@@ -237,7 +237,7 @@ class QuantAct(nn.Module):
         self.act_range_momentum = act_range_momentum
         self.running_stat = running_stat
         self.quant_mode = quant_mode
-        self.percentile = False
+        self.percentile = None
 
         if not per_channel:
             self.register_buffer('x_min', torch.zeros(1))
@@ -287,7 +287,8 @@ class QuantAct(nn.Module):
         # collect runnng stats
         x_act = x if identity is None else identity + x
         if self.running_stat:
-            if not self.percentile:
+            if self.percentile is None:
+                # Original min/max code
                 if not self.per_channel:
                     x_min = x_act.data.min()
                     x_max = x_act.data.max()
@@ -295,7 +296,31 @@ class QuantAct(nn.Module):
                     x_min = x_act.data.min(axis=0).values.min(axis=0).values
                     x_max = x_act.data.max(axis=0).values.max(axis=0).values
             else:
-                raise NotImplementedError("percentile mode is not currently supported.")
+                # Percentile-based range calculation
+                with torch.no_grad():
+                    if not self.per_channel:
+                        # Flatten all dimensions for percentile calculation
+                        x_flat = x_act.data.flatten()
+                        percentile_min = (100 - self.percentile) / 2
+                        percentile_max = 100 - percentile_min
+                        
+                        x_min = torch.quantile(x_flat, percentile_min / 100.0)
+                        x_max = torch.quantile(x_flat, percentile_max / 100.0)
+                    else:
+                        # Per-channel percentile
+                        x_reshaped = x_act.data.reshape(x_act.shape[0], x_act.shape[1], -1)
+                        percentile_min = (100 - self.percentile) / 2
+                        percentile_max = 100 - percentile_min
+                        
+                        x_min = []
+                        x_max = []
+                        for c in range(x_reshaped.shape[1]):
+                            channel_data = x_reshaped[:, c, :].flatten()
+                            x_min.append(torch.quantile(channel_data, percentile_min / 100.0))
+                            x_max.append(torch.quantile(channel_data, percentile_max / 100.0))
+                        
+                        x_min = torch.stack(x_min)
+                        x_max = torch.stack(x_max)
 
             # Initialization
             if torch.eq(self.x_min, self.x_max).all():
