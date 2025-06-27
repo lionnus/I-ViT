@@ -3,15 +3,7 @@
 """
 evaluate_deit_tiny.py - inference / evaluation utility for DeiT-tiny
 ====================================================================
-Two modes of operation
----------------------
-1. **Dataset evaluation** (default)
-   Evaluate on an ImageNet-style validation set and report Top-1/Top-5 accuracy.
-
-2. **Single-image inference** via `--single-image [<path>]`
-   Run the model on one sample image (default: `sample.png`).
-   Prints the Top-5 predicted class indices (or the human-readable labels if
-   `--labels` is given), saves the per-layer IO-stats, and exits.
+Evaluate given weights on ImageNet validation set and report Top-1/Top-5 accuracy.
 
 In both modes statistics about the model are collected using `attach_io_stat_hooks`.
 After forward-pass completion it writes them via `save_io_stats_df`, naming the 
@@ -36,23 +28,30 @@ from tqdm import tqdm
 #  Helpers
 # -----------------------------------------------------------------------------
 
-def load_model(checkpoint_path, device='cuda', num_classes=1000):
+def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None, softmax_type=None, layernorm_type=None):
     """
     Load the model with the given weights checkpoint, checks for configuration.
+    Optional parameters override the saved configuration.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Check if model_config exists in checkpoint (new format)
+    # Check if model_config exists in checkpoint
     if 'model_config' in checkpoint:
         config = checkpoint['model_config']
         print(f"\nLoading model with saved configuration:")
         print(f"  Model: {config.get('model_name', 'deit_tiny')}")
-        print(f"  Quantization bitwidths: {config.get('quant_bitwidths', [8,8,8,8,8,8,8])}")
-        print(f"  GELU type: {config.get('gelu_type', 'ibert')}")
-        print(f"  Softmax type: {config.get('softmax_type', 'ibert')}")
-        print(f"  LayerNorm type: {config.get('layernorm_type', 'ibert')}")
+        print(f"  Quantization bitwidths: {config.get('quant_bitwidths', [8,8,8,8,8,8,8,8])}")
         
-        # Create model with saved configuration
+        # Use override parameters if provided, otherwise use saved config
+        final_gelu_type = gelu_type if gelu_type is not None else config.get('gelu_type', 'ibert')
+        final_softmax_type = softmax_type if softmax_type is not None else config.get('softmax_type', 'ibert')
+        final_layernorm_type = layernorm_type if layernorm_type is not None else config.get('layernorm_type', 'ibert')
+        
+        print(f"  GELU type: {final_gelu_type} {'(overridden)' if gelu_type is not None else ''}")
+        print(f"  Softmax type: {final_softmax_type} {'(overridden)' if softmax_type is not None else ''}")
+        print(f"  LayerNorm type: {final_layernorm_type} {'(overridden)' if layernorm_type is not None else ''}")
+        
+        # Create model with configuration
         model = deit_tiny_patch16_224(
             pretrained=False,
             num_classes=config.get('num_classes', num_classes),
@@ -60,14 +59,15 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000):
             drop_path_rate=config.get('drop_path_rate', 0.1),
             patch_embed_bw=config.get('patch_embed_bw', 8),
             pos_encoding_bw=config.get('pos_encoding_bw', 8),
+            block_input_bw=config.get('block_input_bw', 8),
             attention_out_bw=config.get('attention_out_bw', 8),
             softmax_bw=config.get('softmax_bw', 8),
             mlp_out_bw=config.get('mlp_out_bw', 8),
             norm2_in_bw=config.get('norm2_in_bw', 8),
             att_block_out_bw=config.get('att_block_out_bw', 8),
-            gelu_type=config.get('gelu_type', 'ibert'),
-            softmax_type=config.get('softmax_type', 'ibert'),
-            layernorm_type=config.get('layernorm_type', 'ibert')
+            gelu_type=final_gelu_type,
+            softmax_type=final_softmax_type,
+            layernorm_type=final_layernorm_type
         )
         
         # Print additional info if available
@@ -76,15 +76,26 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000):
         if 'best_acc1' in checkpoint:
             print(f"  Best validation accuracy: {checkpoint['best_acc1']:.2f}%")
     else:
-        # Old checkpoint format or missing config - use defaults
-        print("\nNo model configuration found in checkpoint, using default configuration")
-        print("  (This is normal for older checkpoints)")
+        # Old checkpoint format or missing config - use defaults or overrides
+        print("\nNo model configuration found in checkpoint, using default/override configuration")
+        
+        # Use override parameters if provided, otherwise use defaults
+        final_gelu_type = gelu_type if gelu_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert'
+        final_softmax_type = softmax_type if softmax_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert'
+        final_layernorm_type = layernorm_type if layernorm_type is not None else 'ibert'
+        
+        print(f"  GELU type: {final_gelu_type}")
+        print(f"  Softmax type: {final_softmax_type}")
+        print(f"  LayerNorm type: {final_layernorm_type}")
+        
         model = deit_tiny_patch16_224(
             pretrained=False,
             num_classes=num_classes,
             drop_rate=0.0,
             drop_path_rate=0.1,
-            gelu_type='icustom-v1'
+            gelu_type=final_gelu_type,
+            softmax_type=final_softmax_type,
+            layernorm_type=final_layernorm_type
         )
     
     # Load model weights
@@ -114,7 +125,6 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000):
     # Freeze the model to prevent further training
     freeze_model(model)
     return model
-
 
 def preprocess_image(path: Path | str) -> torch.Tensor:
     """Load and normalise a single image for DeiT-tiny (224by224)."""
@@ -155,15 +165,8 @@ def evaluate_dataset(model, data_loader, device, *, print_batch_stats: bool = Tr
             correct1 += (pred1 == targets).sum().item()
             correct5 += sum(t in p for t, p in zip(targets, pred5))
             tot += imgs.size(0)
-
-            # ───── per-batch timing ────────────────────────────────────
             t_batch = time.perf_counter() - t0
             batch_times.append(t_batch)
-            # if print_batch_stats:                
-            #     throughput = imgs.size(0) / t_batch
-            #     print(f"Batch {i + 1:4}/{len(data_loader)} | "
-            #           f"{t_batch * 1000:7.1f} ms | "
-            #           f"{throughput:8.1f} img/s")
 
     # ───── summary timing ─────────────────────────────────────────────
     total_time = time.perf_counter() - start_total
@@ -204,16 +207,18 @@ def main():
     ap.add_argument("--device", default="cuda:1",
                     help="Compute device (e.g. 'cuda:0' or 'cpu')")
 
-    # Dataset mode
+    # Dataset config
     ap.add_argument("--data-path", default=None,
                     help="Path to ImageNet root containing 'val'. If omitted and --single-image is not set, script aborts.")
     ap.add_argument("--batch-size", type=int, default=128, help="Validation batch size")
-
-    # Single-image mode
-    ap.add_argument("--single-image", nargs="?", const="sample.png", default=None,
-                    help="Run on exactly one image. If the flag is given without a value, uses 'sample.png'.")
-    ap.add_argument("--labels", default=None,
-                    help="Optional JSON mapping class-id -> label for pretty output")
+    
+    # Model configuration overrides
+    ap.add_argument("--gelu-type", default=None,
+                    help="Override GELU type (e.g., 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert')")
+    ap.add_argument("--softmax-type", default=None,
+                    help="Override Softmax type (e.g., 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert')")
+    ap.add_argument("--layernorm-type", default=None,
+                    help="Override LayerNorm type (e.g., 'ibert')")
 
     # Export
     ap.add_argument("--export-onnx", default=None,
@@ -226,7 +231,10 @@ def main():
     
     # Load model from checkpoint.
     print(f"Loading checkpoint from: {args.weights}")
-    model = load_model(args.weights, device=device, num_classes=1000)
+    model = load_model(args.weights, device=device, num_classes=1000, 
+                      gelu_type=args.gelu_type, 
+                      softmax_type=args.softmax_type, 
+                      layernorm_type=args.layernorm_type)
     
     # If --export-onnx flag is provided, export to ONNX and exit.
     if args.export_onnx is not None:
@@ -264,25 +272,10 @@ def main():
     # Attach IO stat hooks to the model
     attach_io_stat_hooks(model)
     
-    # ───────── single-image inference ────────────────────────────────────
-    if args.single_image is not None:
-        img_path = Path(args.single_image)
-        if not img_path.exists():
-            sys.exit(f"ERR: image '{img_path}' not found")
-        print(f"Running inference on: {img_path}")
-        img_tensor = preprocess_image(img_path)
-        # optional labels map
-        labels_map = None
-        if args.labels:
-            with open(args.labels) as fp:
-                labels_map = {int(k): v for k, v in json.load(fp).items()}
-        predict_single(model, img_tensor, device, labels_map)
-        save_io_stats_df("io_stats_single.pkl", to_csv=True)
-        return
 
-    # ───────── dataset evaluation ────────────────────────────────────────
+    # Dataset eval
     if args.data_path is None:
-        sys.exit("ERR: --data-path is required unless --single-image is used")
+        sys.exit("ERR: --data-path is required")
 
     val_dir = Path(args.data_path) / "val"
     if not val_dir.exists():
@@ -306,7 +299,6 @@ def main():
     print(f"Validation set: Top-1 = {top1:.2f}%  |  Top-5 = {top5:.2f}%")
     save_io_stats_df("io_stats_val.pkl", to_csv=True)
     print(time.strftime("%Y-%m-%d %H:%M:%S"), "Evaluation finished.")
-
 
 if __name__ == "__main__":
     main()
