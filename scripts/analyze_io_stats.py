@@ -64,10 +64,10 @@ def summarise(df: pd.DataFrame, out: Path):
         "IVITIntLayerNorm",
         "IBERTIntGELU",
         "IVITIntGELU",
-        "ICUSTOMIntGELU",
+        "PPolyIntGELU",
         "IBERTIntSoftmax",
         "IVITIntSoftmax",
-        "ICUSTOMIntSoftmax",
+        "PPolyIntSoftmax",
     ]
     for typ in special_types:
         sub = df[df["type"] == typ]
