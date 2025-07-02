@@ -21,6 +21,7 @@ from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma, accuracy
+from timm.utils.clip_grad import dispatch_clip_grad
 
 from models import *
 from utils import *
@@ -50,6 +51,8 @@ parser.add_argument('--resume', default='', help='resume from checkpoint')
 parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                     help='start epoch')
 parser.add_argument('--batch-size', default=128, type=int)
+parser.add_argument('--eff-batch-size', default=None, type=int,
+                    help='Effective batch size using gradient accumulation. Must be a multiple of --batch-size')
 parser.add_argument('--epochs', default=90, type=int)
 parser.add_argument('--num-workers', default=8, type=int)
 parser.add_argument('--pin-mem', action='store_true',
@@ -338,7 +341,7 @@ def main():
         model = calibrate_model(model, train_loader, 
                               num_batches=args.calibration_batches, 
                               device=device)
-    # Weights & Biases init
+        # Weights & Biases init
     if not args.no_wandb:
         wandb.init(
             project=args.wandb_project,
@@ -359,7 +362,8 @@ def main():
             'gelu_type': args.layer_type or args.gelu,
             'softmax_type': args.layer_type or args.softmax,
             'layernorm_type': args.layer_type or args.layernorm,
-            'calibration_batches': args.calibration_batches
+            'calibration_batches': args.calibration_batches,
+            'effective_batch_size': args.eff_batch_size or args.batch_size
         }, allow_val_change=True)
         wandb.watch(model, log='gradients', log_freq=100)
 
@@ -511,6 +515,14 @@ def train(args, train_loader, model, criterion, optimizer, epoch, loss_scaler, m
         [batch_time, data_time, losses],
         prefix="Epoch: [{}]".format(epoch))
 
+    # Calculate gradient accumulation steps
+    accumulation_steps = 1
+    if args.eff_batch_size is not None:
+        if args.eff_batch_size % args.batch_size != 0:
+            raise ValueError(f"eff_batch_size ({args.eff_batch_size}) must be a multiple of batch_size ({args.batch_size})")
+        accumulation_steps = args.eff_batch_size // args.batch_size
+        logging.info(f"Using gradient accumulation: {accumulation_steps} steps for effective batch size {args.eff_batch_size}")
+
     # switch to train mode
     model.train()
     unfreeze_model(model)
@@ -528,19 +540,32 @@ def train(args, train_loader, model, criterion, optimizer, epoch, loss_scaler, m
 
         output = model(data)
         loss = criterion(output, target)
-
-        # measure accuracy and record loss
+        # measure accuracy and record loss (use unscaled loss for logging)
         losses.update(loss.item(), data.size(0))
+        
+        # Scale loss by accumulation steps
+        loss = loss / accumulation_steps
+        
+        # Backward pass - accumulate gradients
+        loss_scaler._scaler.scale(loss).backward()
 
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-        loss_scaler(loss, optimizer, clip_grad=max_norm,
-                    parameters=model.parameters(), create_graph=is_second_order)
-
-        torch.cuda.synchronize()
-        if model_ema is not None:
-            model_ema.update(model)
+        # Only update weights after accumulating gradients
+        if (i + 1) % accumulation_steps == 0:
+            # Unscale gradients and clip if needed
+            if max_norm is not None:
+                loss_scaler._scaler.unscale_(optimizer)
+                dispatch_clip_grad(model.parameters(), max_norm, mode='norm')
+            
+            # Step optimizer and update scaler
+            loss_scaler._scaler.step(optimizer)
+            loss_scaler._scaler.update()
+            
+            # Zero gradients for next accumulation
+            optimizer.zero_grad()
+            
+            # Update model EMA
+            if model_ema is not None:
+                model_ema.update(model)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -553,12 +578,21 @@ def train(args, train_loader, model, criterion, optimizer, epoch, loss_scaler, m
                 wandb.log({
                     'iter': i + epoch * len(train_loader),
                     'train_loss': losses.val,
-                    'epoch': epoch
+                    'epoch': epoch,
+                    'effective_batch_size': args.eff_batch_size or args.batch_size
                 })
+    
+    # Handle any remaining gradients at the end of epoch
+    if len(train_loader) % accumulation_steps != 0:
+        if max_norm is not None:
+            loss_scaler._scaler.unscale_(optimizer)
+            dispatch_clip_grad(model.parameters(), max_norm, mode='norm')
+        loss_scaler._scaler.step(optimizer)
+        loss_scaler._scaler.update()
+        optimizer.zero_grad()
                 
     # return avg loss for epoch 
     return losses.avg
-
 
 def validate(args, val_loader, model, criterion, device):
     batch_time = AverageMeter('Time', ':6.3f')
