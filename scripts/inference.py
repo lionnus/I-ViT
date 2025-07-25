@@ -28,7 +28,7 @@ from tqdm import tqdm
 #  Helpers
 # -----------------------------------------------------------------------------
 
-def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None, softmax_type=None, layernorm_type=None):
+def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None, softmax_type=None, layernorm_type=None, bitwidth=None):
     """
     Load the model with the given weights checkpoint, checks for configuration.
     Optional parameters override the saved configuration.
@@ -47,6 +47,20 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
         final_softmax_type = softmax_type if softmax_type is not None else config.get('softmax_type', 'ibert')
         final_layernorm_type = layernorm_type if layernorm_type is not None else config.get('layernorm_type', 'ibert')
         
+        # Use bitwidth override if provided, otherwise use saved config
+        if bitwidth is not None:
+            print(f"  Bitwidth override: All bitwidths set to {bitwidth}")
+            patch_embed_bw = pos_encoding_bw = block_input_bw = attention_out_bw = softmax_bw = mlp_out_bw = norm2_in_bw = att_block_out_bw = bitwidth
+        else:
+            patch_embed_bw = config.get('patch_embed_bw', 8)
+            pos_encoding_bw = config.get('pos_encoding_bw', 8)
+            block_input_bw = config.get('block_input_bw', 8)
+            attention_out_bw = config.get('attention_out_bw', 8)
+            softmax_bw = config.get('softmax_bw', 8)
+            mlp_out_bw = config.get('mlp_out_bw', 8)
+            norm2_in_bw = config.get('norm2_in_bw', 8)
+            att_block_out_bw = config.get('att_block_out_bw', 8)
+        
         print(f"  GELU type: {final_gelu_type} {'(overridden)' if gelu_type is not None else ''}")
         print(f"  Softmax type: {final_softmax_type} {'(overridden)' if softmax_type is not None else ''}")
         print(f"  LayerNorm type: {final_layernorm_type} {'(overridden)' if layernorm_type is not None else ''}")
@@ -57,14 +71,14 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
             num_classes=config.get('num_classes', num_classes),
             drop_rate=config.get('drop_rate', 0.0),
             drop_path_rate=config.get('drop_path_rate', 0.1),
-            patch_embed_bw=config.get('patch_embed_bw', 8),
-            pos_encoding_bw=config.get('pos_encoding_bw', 8),
-            block_input_bw=config.get('block_input_bw', 8),
-            attention_out_bw=config.get('attention_out_bw', 8),
-            softmax_bw=config.get('softmax_bw', 8),
-            mlp_out_bw=config.get('mlp_out_bw', 8),
-            norm2_in_bw=config.get('norm2_in_bw', 8),
-            att_block_out_bw=config.get('att_block_out_bw', 8),
+            patch_embed_bw=patch_embed_bw,
+            pos_encoding_bw=pos_encoding_bw,
+            block_input_bw=block_input_bw,
+            attention_out_bw=attention_out_bw,
+            softmax_bw=softmax_bw,
+            mlp_out_bw=mlp_out_bw,
+            norm2_in_bw=norm2_in_bw,
+            att_block_out_bw=att_block_out_bw,
             gelu_type=final_gelu_type,
             softmax_type=final_softmax_type,
             layernorm_type=final_layernorm_type
@@ -84,6 +98,11 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
         final_softmax_type = softmax_type if softmax_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert'
         final_layernorm_type = layernorm_type if layernorm_type is not None else 'ibert'
         
+        # Use bitwidth override if provided, otherwise use defaults
+        default_bw = bitwidth if bitwidth is not None else 8
+        if bitwidth is not None:
+            print(f"  Bitwidth override: All bitwidths set to {bitwidth}")
+        
         print(f"  GELU type: {final_gelu_type}")
         print(f"  Softmax type: {final_softmax_type}")
         print(f"  LayerNorm type: {final_layernorm_type}")
@@ -93,6 +112,14 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
             num_classes=num_classes,
             drop_rate=0.0,
             drop_path_rate=0.1,
+            patch_embed_bw=default_bw,
+            pos_encoding_bw=default_bw,
+            block_input_bw=default_bw,
+            attention_out_bw=default_bw,
+            softmax_bw=default_bw,
+            mlp_out_bw=default_bw,
+            norm2_in_bw=default_bw,
+            att_block_out_bw=default_bw,
             gelu_type=final_gelu_type,
             softmax_type=final_softmax_type,
             layernorm_type=final_layernorm_type
@@ -219,6 +246,8 @@ def main():
                     help="Override Softmax type (e.g., 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert')")
     ap.add_argument("--layernorm-type", default=None,
                     help="Override LayerNorm type (e.g., 'ibert')")
+    ap.add_argument("--bitwidth", type=int, default=None,
+                    help="Override all quantization bitwidths (e.g., 4, 8, 16)")
 
     # Export
     ap.add_argument("--export-onnx", default=None,
@@ -234,7 +263,8 @@ def main():
     model = load_model(args.weights, device=device, num_classes=1000, 
                       gelu_type=args.gelu_type, 
                       softmax_type=args.softmax_type, 
-                      layernorm_type=args.layernorm_type)
+                      layernorm_type=args.layernorm_type,
+                      bitwidth=args.bitwidth)
     
     # If --export-onnx flag is provided, export to ONNX and exit.
     if args.export_onnx is not None:
