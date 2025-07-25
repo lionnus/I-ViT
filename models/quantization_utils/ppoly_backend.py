@@ -62,7 +62,7 @@ def optimize_segment_bounds(xs_np, ys_np, x_lo, x_hi, segments, degree, max_iter
                         x_seg = xs_np[mask]
                         y_seg = ys_np[mask]
                         with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", np.RankWarning)
+                            # warnings.simplefilter("ignore", RankWarning)
                             coeffs = np.polyfit(x_seg, y_seg, degree)
                         y_pred = np.polyval(coeffs, x_seg)
                         total_error += np.sum((y_seg - y_pred) ** 2)
@@ -124,7 +124,7 @@ def fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, segments, degree, alpha=
         
         if len(x_fit) > 0:  # Ensure we have data points in this segment
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore", np.RankWarning)
+                # warnings.simplefilter("ignore", np.RankWarning)
                 coeffs = np.polyfit(x_fit, y_fit, degree).astype(np.float32)
         else:
             # If no points in this segment, use zero coefficients
@@ -203,7 +203,7 @@ def compute_integer_coefficients(float_pieces, scaling_factor, N, device, verbos
         for i, coeff in enumerate(coeffs):
             power = deg - i
             scaled = coeff * (scaling_factor ** power) * (2 ** N)
-            int_coeff = torch.floor(torch.tensor(scaled, device=device))
+            int_coeff = torch.floor(scaled.clone().detach())
             
             # Calculate coefficient bit-width
             abs_val = torch.abs(int_coeff).item()
