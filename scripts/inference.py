@@ -94,8 +94,8 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
         print("\nNo model configuration found in checkpoint, using default/override configuration")
         
         # Use override parameters if provided, otherwise use defaults
-        final_gelu_type = gelu_type if gelu_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert'
-        final_softmax_type = softmax_type if softmax_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert'
+        final_gelu_type = gelu_type if gelu_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert_optim-bounds_true'
+        final_softmax_type = softmax_type if softmax_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert_optim-bounds_true'
         final_layernorm_type = layernorm_type if layernorm_type is not None else 'ibert'
         
         # Use bitwidth override if provided, otherwise use defaults
@@ -241,9 +241,9 @@ def main():
     
     # Model configuration overrides
     ap.add_argument("--gelu-type", default=None,
-                    help="Override GELU type (e.g., 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert')")
+                    help="Override GELU type (e.g., 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert_optim-bounds_true')")
     ap.add_argument("--softmax-type", default=None,
-                    help="Override Softmax type (e.g., 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert')")
+                    help="Override Softmax type (e.g., 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert_optim-bounds_false')")
     ap.add_argument("--layernorm-type", default=None,
                     help="Override LayerNorm type (e.g., 'ibert')")
     ap.add_argument("--bitwidth", type=int, default=None,
