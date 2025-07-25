@@ -144,7 +144,7 @@ class PPolyIntSoftmax(nn.Module):
     Implementation of Integer Softmax using piecewise polynomial approximation for exp()
     """
     
-    def __init__(self, output_bit=8, scale_bits=22, seg=16, deg=2, backend='ibert', alpha=0.0, optim_bounds=True):
+    def __init__(self, output_bit=8, scale_bits=28, seg=16, deg=2, backend='float', alpha=0.0, optim_bounds=False):
         super().__init__()
         self.output_bit = output_bit
         self.N = scale_bits  # Bit shift for integer representation
