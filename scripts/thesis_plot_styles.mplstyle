@@ -57,7 +57,7 @@ lines.markersize          : 1.5
 
 # -------- Colour cycle --------------------------------------------------------
 # Modern, colour‑blind‑friendly palette (Okabe & Ito, plus neutral grey)
-axes.prop_cycle           : cycler('color', ['#0077BB', '#33BBEE', '#009988', '#EE7733', '#CC3311', '#EE3377', '#BBBBBB'])
+axes.prop_cycle : cycler(color=['0077BB', '33BBEE', '009988', 'EE7733', 'CC3311', 'EE3377', 'BBBBBB'])
 
 # -------- Misc ----------------------------------------------------------------
 errorbar.capsize          : 2
