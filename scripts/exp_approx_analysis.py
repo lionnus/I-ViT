@@ -64,7 +64,7 @@ def int_polynomial(x_int, scaling_factor):
     scaling_factor_out = coef[0] * scaling_factor ** 2
     return z, scaling_factor_out
 
-def int_exp_ibert(x_int, scaling_factor, n=16):
+def int_exp_ibert(x_int, scaling_factor, n=30):
     """
     Integer approximation of exp(x) using the polynomial method from IBERT
     """
@@ -90,44 +90,92 @@ def int_exp_ibert(x_int, scaling_factor, n=16):
 # Custom Piecewise Polynomial Implementation
 # ------------------------------------------------------------------
 class CustomPiecewisePolynomial:
-    def __init__(self, N=20, segments=16, degree=2):
+    def __init__(self, N=20, segments=16, degree=2, ibert_patch=False):
         self.N = N  # Bit shift for integer representation
         self.segments = segments
         self.degree = degree
-        self.input_range = (-11.0, 0.0)
-        self.float_pieces = self._fit_piecewise_polynomials()
+        self.ibert_patch = ibert_patch
+        self.input_range = (-18.0, 0.0)
+        
+        if not self.ibert_patch:
+            # Fit to standard exponential function
+            self.float_pieces = self._fit_piecewise_polynomials()
+        else:
+            # Initialize IBERT parameters
+            self.x0 = -0.6931  # −ln(2)
+            self.n = 30  # sufficiently large integer
+            self.coef = [0.35815147, 0.96963238, 1.]
+            self.coef[1] /= self.coef[0]
+            self.coef[2] /= self.coef[0]
+            self.float_pieces = None  # Will be set when needed
     
     def _exp_func(self, x):
         """Standard exponential function for fitting"""
-        return np.exp(np.clip(x, -50, 50))  # Clip to avoid overflow/underflow
+        return np.exp(np.clip(x, -50, 0))  # Clip to avoid overflow/underflow
     
-    def _fit_piecewise_polynomials(self):
+    def _fit_piecewise_polynomials(self, x_range=None, scaling_factor=None):
         """Fit piecewise polynomials to approximate exp(x)."""
-        x_lo, x_hi = self.input_range
-        xs = np.linspace(x_lo, x_hi, 10000, dtype=np.float32)
-        ys = self._exp_func(xs)
+        if self.ibert_patch and x_range is not None and scaling_factor is not None:
+            # Use IBERT exponential approximation as the target function
+            x_lo = torch.floor(torch.min(x_range)).item()
+            x_hi = torch.ceil(torch.max(x_range)).item()
+            # Ensure we stay in reasonable range for exp approximation
+            x_hi = min(x_hi, 0.0)
+            x_lo = max(x_lo, -50.0)
+            self.input_range = (x_lo, x_hi)
+            
+            # Create xs as a tensor
+            xs = torch.linspace(x_lo, x_hi, 10000, device=scaling_factor.device, dtype=scaling_factor.dtype)
+            
+            # Use IBERT's exp approximation as the golden model
+            xs_int = torch.floor(xs / scaling_factor).to(torch.int32)
+            ys_int, scaling_factor_out = int_exp_ibert(xs_int, scaling_factor, n=self.n)
+            ys = ys_int * scaling_factor_out
+            
+            # Convert to numpy for polynomial fitting
+            ys_np = ys.detach().cpu().numpy()
+            xs_np = xs.detach().cpu().numpy()
+        else:
+            # Use standard exponential
+            x_lo, x_hi = self.input_range
+            xs_np = np.linspace(x_lo, x_hi, 10000, dtype=np.float32)
+            ys_np = self._exp_func(xs_np)
+            
         bounds = np.linspace(x_lo, x_hi, self.segments + 1, dtype=np.float32)
         
         pieces = []
         for lo, hi in zip(bounds[:-1], bounds[1:]):
-            mask = (xs >= lo) & (xs <= hi)
+            mask = (xs_np >= lo) & (xs_np <= hi)
             if np.sum(mask) < self.degree + 1:
                 # Not enough points for fitting, use neighboring points
                 center = (lo + hi) / 2
-                distances = np.abs(xs - center)
+                distances = np.abs(xs_np - center)
                 indices = np.argsort(distances)[:max(self.degree + 1, 10)]
-                x_fit = xs[indices]
-                y_fit = ys[indices]
+                x_fit = xs_np[indices]
+                y_fit = ys_np[indices]
             else:
-                x_fit = xs[mask]
-                y_fit = ys[mask]
+                x_fit = xs_np[mask]
+                y_fit = ys_np[mask]
             
             coeffs = np.polyfit(x_fit, y_fit, self.degree).astype(np.float32)
             pieces.append(((lo, hi), coeffs))
-        return pieces
+            
+        if self.ibert_patch:
+            return pieces, scaling_factor_out
+        else:
+            return pieces
     
     def int_exp_poly(self, x_int, scaling_factor):
         """Evaluate piecewise polynomial for exponential approximation."""
+        
+        if self.ibert_patch and self.float_pieces is None:
+            # Fit polynomials to IBERT's exp approximation on first use
+            x_range = torch.linspace(self.input_range[0], self.input_range[1], 1000, device=x_int.device, dtype=scaling_factor.dtype)
+            result = self._fit_piecewise_polynomials(x_range, scaling_factor)
+            if isinstance(result, tuple):
+                self.float_pieces, _ = result
+            else:
+                self.float_pieces = result
         
         # Build integer bounds and integer coefficients under torch.no_grad
         with torch.no_grad():
@@ -163,9 +211,11 @@ class CustomPiecewisePolynomial:
         # Evaluate polynomial without building gradient graph
         with torch.no_grad():
             for i in range(S):
-                if i == 0:
-                    mask_i = x_int <= hi_i[0]
-                elif i == S - 1:
+                if i==0:
+                    below_range_mask = x_int < lo_i[0]
+                    exp_int[below_range_mask] = 0    
+                    
+                if i == S - 1:
                     mask_i = x_int >= lo_i[-1]
                 else:
                     mask_i = (x_int >= lo_i[i]) & (x_int <= hi_i[i])
@@ -184,6 +234,7 @@ class CustomPiecewisePolynomial:
                 exp_int[mask_i] = r
         
         # Convert integer result back to float
+        exp_int = torch.clamp(exp_int, min=0)
         exp_float = exp_int / (2 ** self.N)
         scaling_factor_out = scaling_factor / (2 ** self.N)
         
@@ -197,14 +248,15 @@ class CustomPiecewisePolynomial:
 # ------------------------------------------------------------------
 def run_comparison():
     # Setup input range from -11 to 0, with 8 bit quantization
-    full_range = 40
+    full_range = 140
     bit_width = 8
-    x = torch.linspace(-full_range/2, 0, 2**(bit_width-1)+1)
+    x = torch.linspace(-full_range/2, 0, 2**(bit_width)+1)
     
     # Set scaling factors
     scale_ivit = full_range/2**bit_width
     scale_ibert = full_range/2**bit_width
     scale_custom = full_range/2**bit_width
+    scale_custom_ibert = full_range/2**bit_width
     
     # Compute float reference
     y_float = torch.exp(x)
@@ -213,6 +265,7 @@ def run_comparison():
     x_int_ivit = (x / scale_ivit).to(torch.int32)
     x_int_ibert = (x / scale_ibert).to(torch.int32)
     x_int_custom = (x / scale_custom).to(torch.int32)
+    x_int_custom_ibert = (x / scale_custom_ibert).to(torch.int32)
     
     # Apply integer exponential approximations
     exp_int_ivit, scale_out_ivit = int_exp_shift(x_int_ivit, torch.tensor(scale_ivit))
@@ -221,9 +274,13 @@ def run_comparison():
     exp_int_ibert, scale_out_ibert = int_exp_ibert(x_int_ibert, torch.tensor(scale_ibert))
     y_ibert = exp_int_ibert * scale_out_ibert
     
-    # Apply custom piecewise polynomial approximation
-    custom_approx = CustomPiecewisePolynomial(N=20, segments=6, degree=2)
+    # Apply custom piecewise polynomial approximation (standard)
+    custom_approx = CustomPiecewisePolynomial(N=20, segments=6, degree=2, ibert_patch=False)
     y_custom, scale_out_custom = custom_approx.int_exp_poly(x_int_custom, torch.tensor(scale_custom))
+    
+    # Apply custom piecewise polynomial approximation (IBERT patch)
+    custom_approx_ibert = CustomPiecewisePolynomial(N=20, segments=6, degree=2, ibert_patch=True)
+    y_custom_ibert, scale_out_custom_ibert = custom_approx_ibert.int_exp_poly(x_int_custom_ibert, torch.tensor(scale_custom_ibert))
     
     # Compute errors
     abs_err_ivit = (y_ivit - y_float).abs()
@@ -234,6 +291,9 @@ def run_comparison():
     
     abs_err_custom = (y_custom - y_float).abs()
     rel_err_custom = abs_err_custom / (y_float + 1e-10) * 100  # percentage
+    
+    abs_err_custom_ibert = (y_custom_ibert - y_float).abs()
+    rel_err_custom_ibert = abs_err_custom_ibert / (y_float + 1e-10) * 100  # percentage
     
     # Print error metrics
     print("=== I-ViT int_exp_shift Error Metrics ===")
@@ -255,16 +315,24 @@ def run_comparison():
     print(f"Mean absolute error: {abs_err_custom.mean().item():.6f}")
     print(f"Max percentage error: {rel_err_custom.max().item():.2f}%")
     print(f"Mean percentage error: {rel_err_custom.mean().item():.2f}%")
+    print()
+    
+    print("=== Custom PP (IBERT patch) Error Metrics ===")
+    print(f"Max absolute error: {abs_err_custom_ibert.max().item():.6f}")
+    print(f"Mean absolute error: {abs_err_custom_ibert.mean().item():.6f}")
+    print(f"Max percentage error: {rel_err_custom_ibert.max().item():.2f}%")
+    print(f"Mean percentage error: {rel_err_custom_ibert.mean().item():.2f}%")
     
     # Create figure with subplots
-    fig = plt.figure()
+    fig = plt.figure(figsize=(12, 10))
     
     # Plot 1: Exponential function and approximations
     plt.subplot(2, 2, 1)
     plt.plot(x.numpy(), y_float.numpy(), 'k-', label="Float exp(x)", linewidth=2)
     plt.plot(x.numpy(), y_ivit.numpy(), '--', label="I-ViT int_exp_shift", linewidth=1.5)
     plt.plot(x.numpy(), y_ibert.numpy(), ':', label="I-BERT int_exp", linewidth=1.5)
-    plt.plot(x.numpy(), y_custom.numpy(), '-.', label="Custom Piecewise Poly", linewidth=1.5)
+    plt.plot(x.numpy(), y_custom.numpy(), '-.', label="Custom PP", linewidth=1.5)
+    plt.plot(x.numpy(), y_custom_ibert.numpy(), '-', label="Custom PP (IBERT)", linewidth=1.5, alpha=0.7)
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.title("exp(x) vs Integer Approximations")
@@ -273,9 +341,10 @@ def run_comparison():
     
     # Plot 2: Absolute errors
     plt.subplot(2, 2, 2)
-    plt.plot(x.numpy(), abs_err_ivit.numpy(), label="I-ViT absolute error", linewidth=1.5)
-    plt.plot(x.numpy(), abs_err_ibert.numpy(), label="I-BERT absolute error", linewidth=1.5)
-    plt.plot(x.numpy(), abs_err_custom.numpy(), label="Custom PP absolute error", linewidth=1.5)
+    plt.plot(x.numpy(), abs_err_ivit.numpy(), label="I-ViT", linewidth=1.5)
+    plt.plot(x.numpy(), abs_err_ibert.numpy(), label="I-BERT", linewidth=1.5)
+    plt.plot(x.numpy(), abs_err_custom.numpy(), label="Custom PP", linewidth=1.5)
+    plt.plot(x.numpy(), abs_err_custom_ibert.numpy(), label="Custom PP (IBERT)", linewidth=1.5, alpha=0.7)
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.title("Absolute Error")
@@ -284,22 +353,25 @@ def run_comparison():
     
     # Plot 3: Percentage errors
     plt.subplot(2, 2, 3)
-    plt.plot(x.numpy(), rel_err_ivit.numpy(), label="I-ViT percentage error", linewidth=1.5)
-    plt.plot(x.numpy(), rel_err_ibert.numpy(), label="I-BERT percentage error", linewidth=1.5)
-    plt.plot(x.numpy(), rel_err_custom.numpy(), label="Custom PP percentage error", linewidth=1.5)
+    plt.plot(x.numpy(), rel_err_ivit.numpy(), label="I-ViT", linewidth=1.5)
+    plt.plot(x.numpy(), rel_err_ibert.numpy(), label="I-BERT", linewidth=1.5)
+    plt.plot(x.numpy(), rel_err_custom.numpy(), label="Custom PP", linewidth=1.5)
+    plt.plot(x.numpy(), rel_err_custom_ibert.numpy(), label="Custom PP (IBERT)", linewidth=1.5, alpha=0.7)
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.title("Percentage Error")
     plt.xlabel("Input x")
     plt.ylabel("Error (%)")
-    plt.ylim(0, min(100, max(rel_err_ivit.max().item(), rel_err_ibert.max().item(), rel_err_custom.max().item()) * 1.1))
+    plt.ylim(0, min(100, max(rel_err_ivit.max().item(), rel_err_ibert.max().item(), 
+                            rel_err_custom.max().item(), rel_err_custom_ibert.max().item()) * 1.1))
     
     # Plot 4: Log scale for better visualization of small values
     plt.subplot(2, 2, 4)
     plt.semilogy(x.numpy(), y_float.numpy(), 'k-', label="Float exp(x)", linewidth=2)
-    plt.semilogy(x.numpy(), y_ivit.numpy(), '--', label="I-ViT int_exp_shift", linewidth=1.5)
-    plt.semilogy(x.numpy(), y_ibert.numpy(), ':', label="I-BERT int_exp", linewidth=1.5)
-    plt.semilogy(x.numpy(), y_custom.numpy(), '-.', label="Custom Piecewise Poly", linewidth=1.5)
+    plt.semilogy(x.numpy(), y_ivit.numpy(), '--', label="I-ViT", linewidth=1.5)
+    plt.semilogy(x.numpy(), y_ibert.numpy(), ':', label="I-BERT", linewidth=1.5)
+    plt.semilogy(x.numpy(), y_custom.numpy(), '-.', label="Custom PP", linewidth=1.5)
+    plt.semilogy(x.numpy(), y_custom_ibert.numpy(), '-', label="Custom PP (IBERT)", linewidth=1.5, alpha=0.7)
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.title("exp(x) vs Integer Approximations (Log Scale)")
@@ -309,22 +381,39 @@ def run_comparison():
     plt.tight_layout()
     plt.show()
     
-    # Additional analysis: Show piecewise boundaries
-    fig2 = plt.figure()
-    plt.plot(x.numpy(), y_float.numpy(), 'k-', label="Float exp(x)", linewidth=2)
-    plt.plot(x.numpy(), y_custom.numpy(), 'r-', label="Custom Piecewise Poly", linewidth=1.5, alpha=0.8)
+    # Additional analysis: Show piecewise boundaries comparison
+    fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Left plot: Standard piecewise polynomial
+    ax1.plot(x.numpy(), y_float.numpy(), 'k-', label="Float exp(x)", linewidth=2)
+    ax1.plot(x.numpy(), y_custom.numpy(), 'r-', label="Custom PP (Standard)", linewidth=1.5, alpha=0.8)
     
     # Mark segment boundaries
-    custom_approx_vis = CustomPiecewisePolynomial(N=20, segments=16, degree=2)
-    bounds = np.linspace(-11, 0, custom_approx_vis.segments + 1)
+    bounds = np.linspace(-full_range/2, 0, custom_approx.segments + 1)
     for b in bounds[1:-1]:
-        plt.axvline(x=b, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+        ax1.axvline(x=b, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
     
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.title(f"Piecewise Polynomial Approximation (segments={custom_approx_vis.segments}, degree={custom_approx_vis.degree})")
-    plt.xlabel("Input x")
-    plt.ylabel("exp(x)")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title(f"PP Approximation to exp(x)\n(segments={custom_approx.segments}, degree={custom_approx.degree})")
+    ax1.set_xlabel("Input x")
+    ax1.set_ylabel("exp(x)")
+    
+    # Right plot: IBERT-based piecewise polynomial
+    ax2.plot(x.numpy(), y_float.numpy(), 'k-', label="Float exp(x)", linewidth=2)
+    ax2.plot(x.numpy(), y_ibert.numpy(), 'b:', label="I-BERT exp", linewidth=2)
+    ax2.plot(x.numpy(), y_custom_ibert.numpy(), 'g-', label="Custom PP (IBERT)", linewidth=1.5, alpha=0.8)
+    
+    # Mark segment boundaries
+    for b in bounds[1:-1]:
+        ax2.axvline(x=b, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+    
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.set_title(f"PP Approximation to IBERT exp\n(segments={custom_approx_ibert.segments}, degree={custom_approx_ibert.degree})")
+    ax2.set_xlabel("Input x")
+    ax2.set_ylabel("exp(x)")
+    
     plt.tight_layout()
     plt.show()
     
@@ -333,20 +422,31 @@ def run_comparison():
     print(f"I-ViT scaling factor: {scale_ivit:.6f}")
     print(f"I-BERT scaling factor: {scale_ibert:.6f}")
     print(f"Custom scaling factor: {scale_custom:.6f}")
-    # print int ranges and how many bits are needed
-    print(f"I-ViT int output range(y_ivit/scale not x_int_ivit): [{y_ivit.min().item()/scale_out_ivit:.6f}, {y_ivit.max().item()/scale_out_ivit:.6f}]")
+    print(f"Custom (IBERT) scaling factor: {scale_custom_ibert:.6f}")
+    
+    # Integer ranges
+    print(f"\nI-ViT int output range: [{y_ivit.min().item()/scale_out_ivit:.6f}, {y_ivit.max().item()/scale_out_ivit:.6f}]")
     print(f"I-BERT int range: [{y_ibert.min().item()/scale_out_ibert:.6f}, {y_ibert.max().item()/scale_out_ibert:.6f}]")
     print(f"Custom int range: [{y_custom.min().item()/scale_out_custom:.6f}, {y_custom.max().item()/scale_out_custom:.6f}]")
-    # for OUTPUT
-    print(f"I-ViT output range: [{y_ivit.min().item()}, {y_ivit.max().item()}]")
+    print(f"Custom (IBERT) int range: [{y_custom_ibert.min().item()/scale_out_custom_ibert:.6f}, {y_custom_ibert.max().item()/scale_out_custom_ibert:.6f}]")
+    
+    # Output ranges
+    print(f"\nI-ViT output range: [{y_ivit.min().item()}, {y_ivit.max().item()}]")
     print(f"I-BERT output range: [{y_ibert.min().item()}, {y_ibert.max().item()}]")
     print(f"Custom output range: [{y_custom.min().item()}, {y_custom.max().item()}]")
-    # BITS NEEDED for output in one line
+    print(f"Custom (IBERT) output range: [{y_custom_ibert.min().item()}, {y_custom_ibert.max().item()}]")
+    
+    # Bits needed for output
     bits_needed_ivit = (y_ivit.max() / scale_out_ivit)/2**32
     bits_needed_ibert = (y_ibert.max() / scale_out_ibert)/2**32
     bits_needed_custom = (y_custom.max() / scale_out_custom)/2**32
-    # print all needed bits in one line
-    print(f"Bits needed for output: I-ViT: {bits_needed_ivit}, I-BERT: {bits_needed_ibert}, Custom: {bits_needed_custom}")
+    bits_needed_custom_ibert = (y_custom_ibert.max() / scale_out_custom_ibert)/2**32
+    
+    print(f"\nBits needed for output:")
+    print(f"  I-ViT: {bits_needed_ivit:.6f}")
+    print(f"  I-BERT: {bits_needed_ibert:.6f}")
+    print(f"  Custom: {bits_needed_custom:.6f}")
+    print(f"  Custom (IBERT): {bits_needed_custom_ibert:.6f}")
 
 if __name__ == "__main__":
     run_comparison()
