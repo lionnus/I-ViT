@@ -27,16 +27,21 @@ def optimize_segment_bounds(xs_np, ys_np, x_lo, x_hi, segments, degree, max_iter
     Returns:
         Optimized boundaries array
     """
+    # Optimization parameters
+    MIN_WIDTH_DIVISOR = 4  # Minimum segment width = total_range / (segments * MIN_WIDTH_DIVISOR)
+    SEARCH_RANGE_FACTOR = 0.3  # Maximum movement as fraction of neighbor span
+    SEARCH_STEPS = 10  # Number of positions to test in search range
+    
     # Initialize uniform boundaries
     bounds = np.linspace(x_lo, x_hi, segments + 1, dtype=np.float32)
-    min_width = (x_hi - x_lo) / (segments * 4)  # Minimum segment width
+    min_width = (x_hi - x_lo) / (segments * MIN_WIDTH_DIVISOR)  # Minimum segment width
     
     # Optimize boundaries using coordinate descent
     for iteration in range(max_iter):
         for i in range(1, segments):
             # Search range for boundary i
-            lo_search = max(bounds[i-1] + min_width, bounds[i] - 0.3 * (bounds[i+1] - bounds[i-1]))
-            hi_search = min(bounds[i+1] - min_width, bounds[i] + 0.3 * (bounds[i+1] - bounds[i-1]))
+            lo_search = max(bounds[i-1] + min_width, bounds[i] - SEARCH_RANGE_FACTOR * (bounds[i+1] - bounds[i-1]))
+            hi_search = min(bounds[i+1] - min_width, bounds[i] + SEARCH_RANGE_FACTOR * (bounds[i+1] - bounds[i-1]))
             
             if lo_search >= hi_search:
                 continue
@@ -45,7 +50,7 @@ def optimize_segment_bounds(xs_np, ys_np, x_lo, x_hi, segments, degree, max_iter
             best_pos = bounds[i]
             best_error = float('inf')
             
-            for pos in np.linspace(lo_search, hi_search, 10):
+            for pos in np.linspace(lo_search, hi_search, SEARCH_STEPS):
                 bounds_test = bounds.copy()
                 bounds_test[i] = pos
                 
@@ -119,13 +124,13 @@ def fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, segments, degree, alpha=
         
         if len(x_fit) > 0:  # Ensure we have data points in this segment
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore", np.RankWarning) # TODO Not ignore but handle properly?
+                warnings.simplefilter("ignore", np.RankWarning)
                 coeffs = np.polyfit(x_fit, y_fit, degree).astype(np.float32)
         else:
             # If no points in this segment, use zero coefficients
             coeffs = np.zeros(degree + 1, dtype=np.float32)
         
-        # Store original bounds for eval
+        # Store original bounds (not extended) for evaluation
         pieces.append(((lo, hi), coeffs))
         
         # Debug plotting for this segment
@@ -137,13 +142,13 @@ def fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, segments, degree, alpha=
                 plt.axvspan(float(fit_lo), float(fit_hi), alpha=0.1, color=color, 
                            label=f'Segment {i} fit region' if i == 0 else "")
             
-            # Plot polynomial approximation over the evaluation bounds
+            # Plot polynomial approximation over the evaluation bounds (not extended)
             x_eval = np.linspace(float(lo), float(hi), 100)
             y_eval = np.polyval(coeffs, x_eval)
             plt.plot(x_eval, y_eval, color=color, linewidth=2, 
                     label=f'Segment {i} polynomial')
             
-            # Plot vertical bounds
+            # Plot vertical bounds (dotted lines)
             plt.axvline(float(lo), color=color, linestyle='--', alpha=0.7, linewidth=1)
             if i == segments - 1:  # Plot the final bound
                 plt.axvline(float(hi), color=color, linestyle='--', alpha=0.7, linewidth=1)
