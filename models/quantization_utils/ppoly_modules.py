@@ -89,10 +89,9 @@ class PPolyIntGELU(nn.Module):
             n = 6
             coeff = [-0.2888, -1.769, 1]
             scaling_factor_out = scaling_factor/k
-            scaling_factor_out = scaling_factor_out ** 2 / coeff[0]
+            scaling_factor_out = scaling_factor_out ** 2 * coeff[0]
             scaling_factor_out = scaling_factor_out * (2**n)
             scaling_factor_out = scaling_factor * scaling_factor_out / 2
-            scaling_factor_out = -scaling_factor_out
         else:   
             scaling_factor_out = scaling_factor / (2 ** self.N)
         
