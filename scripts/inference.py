@@ -23,6 +23,8 @@ import torchvision
 from models import *
 from utils import *
 from tqdm import tqdm
+# fix random seed for rand for warmup run
+torch.manual_seed(42)
 
 # -----------------------------------------------------------------------------
 #  Helpers
@@ -94,8 +96,8 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
         print("\nNo model configuration found in checkpoint, using default/override configuration")
         
         # Use override parameters if provided, otherwise use defaults
-        final_gelu_type = gelu_type if gelu_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert_optim-bounds_true'
-        final_softmax_type = softmax_type if softmax_type is not None else 'ppoly_deg_1_seg_32_scale-bits_30_backend_ibert_optim-bounds_true'
+        final_gelu_type = gelu_type if gelu_type is not None else 'ppoly_deg_2_seg_16_scale-bits_24_backend_ibert_optim-bounds_true'
+        final_softmax_type = softmax_type if softmax_type is not None else 'ppoly_deg_2_seg_16_scale-bits_24_backend_ibert_optim-bounds_true'
         final_layernorm_type = layernorm_type if layernorm_type is not None else 'ibert'
         
         # Use bitwidth override if provided, otherwise use defaults
@@ -156,7 +158,7 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
 def preprocess_image(path: Path | str) -> torch.Tensor:
     """Load and normalise a single image for DeiT-tiny (224by224)."""
     tf = T.Compose([
-        T.Resize(int(224 * 1.14)),  # 256 if you prefer standard
+        T.Resize(int(224 * 1.14)),
         T.CenterCrop(224),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
