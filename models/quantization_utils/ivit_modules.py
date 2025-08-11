@@ -71,11 +71,11 @@ class IVITIntGELU(nn.Module):
     Class to quantize given GELU layer
     """
 
-    def __init__(self, output_bit=8):
+    def __init__(self, output_bit=8, n=23):
         super(IVITIntGELU, self).__init__()
         self.output_bit = output_bit
 
-        self.n = 23  # sufficiently large integer
+        self.n = n  # sufficiently large integer
         #The minimum value for ensuring accuracy (varies depending on models)
 
         self.register_buffer('act_scaling_factor', torch.zeros(1))
