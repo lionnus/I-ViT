@@ -142,12 +142,12 @@ class PPolyIntSoftmax(nn.Module):
     """
     Implementation of Integer Softmax using piecewise polynomial approximation for exp()
     """
-    
-    def __init__(self, output_bit=8, scale_bits=28, seg=16, deg=2, backend='float', alpha=0.0, optim_bounds=False):
+
+    def __init__(self, output_bit=8, scale_bits=28, exp_bits=16, seg=16, deg=2, backend='float', alpha=0.0, optim_bounds=False):
         super().__init__()
         self.output_bit = output_bit
         self.N = scale_bits  # Bit shift for integer representation
-        self.exp_bitwidth = 16
+        self.exp_bitwidth = exp_bits
         self.segments = seg
         self.degree = deg
         self.backend = backend  # 'ibert' or 'float'
@@ -271,8 +271,22 @@ class PPolyIntSoftmax(nn.Module):
         exp_int = torch.clamp(exp_int, min=0)
         
         return exp_int
+    
+    def exp_debug(self, x, scaling_factor):
+        """
+        Returns (exp_approx_float, exp_true_float)
+        """
+        device = x.device
+        s = scaling_factor.to(device)
+        with torch.no_grad():
+            x_int = floor_ste.apply(x / s)
+            x_int = x_int - x_int.max(dim=-1, keepdim=True).values
+            exp_int = self.int_exp_poly(x_int, s)
+            exp_approx_float = exp_int / (2 ** self.N)
+            exp_true_float = torch.exp(x_int.to(torch.float32) * s)
+        return exp_approx_float, exp_true_float
 
-    def forward(self, x, scaling_factor):
+    def forward(self, x, scaling_factor, return_exp_debug: bool = False):
         """Forward pass implementing integer softmax with polynomial exp approximation."""
         device = x.device
         scaling_factor = scaling_factor.to(device)
@@ -313,4 +327,10 @@ class PPolyIntSoftmax(nn.Module):
         
         # Ensure output is quantized
         output = scaling_factor_out * floor_ste.apply(output / scaling_factor_out)
+        
+        if return_exp_debug:
+            with torch.no_grad():
+                exp_approx_float, exp_true_float = self.exp_debug(x, scaling_factor)
+            return output, scaling_factor_out, {"exp_true": exp_true_float, "exp_approx": exp_approx_float}
+
         return output, scaling_factor_out
