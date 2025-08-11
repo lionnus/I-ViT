@@ -4,6 +4,7 @@ Piecewise polynomial fitting utilities for integer approximations
 
 import torch
 import numpy as np
+import math
 import matplotlib.pyplot as plt
 import warnings
 
@@ -62,7 +63,7 @@ def optimize_segment_bounds(xs_np, ys_np, x_lo, x_hi, segments, degree, max_iter
                         x_seg = xs_np[mask]
                         y_seg = ys_np[mask]
                         with warnings.catch_warnings():
-                            # warnings.simplefilter("ignore", RankWarning)
+                            # warnings.simplefilter("ignore", np.RankWarning)
                             coeffs = np.polyfit(x_seg, y_seg, degree)
                         y_pred = np.polyval(coeffs, x_seg)
                         total_error += np.sum((y_seg - y_pred) ** 2)
@@ -94,6 +95,12 @@ def fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, segments, degree, alpha=
     Returns:
         List of ((lo, hi), coeffs) tuples for each segment
     """
+    # Convert to float64 for better numerical stability
+    xs_np = xs_np.astype(np.float64)
+    ys_np = ys_np.astype(np.float64)
+    x_lo = float(x_lo)
+    x_hi = float(x_hi)
+    
     # Get boundaries - optimized or uniform
     if optim_bounds:
         bounds = optimize_segment_bounds(xs_np, ys_np, x_lo, x_hi, segments, degree)
@@ -122,13 +129,51 @@ def fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, segments, degree, alpha=
         x_fit = xs_np[mask]
         y_fit = ys_np[mask]
         
-        if len(x_fit) > 0:  # Ensure we have data points in this segment
+        if len(x_fit) > degree:  # Ensure we have enough points for fitting
+            # Normalize x values to [-1, 1] for better numerical conditioning
+            x_center = (fit_lo + fit_hi) / 2.0
+            x_scale = (fit_hi - fit_lo) / 2.0
+            
+            # Avoid division by zero for degenerate segments
+            if abs(x_scale) < 1e-10:
+                x_scale = 1.0
+                x_normalized = x_fit - x_center
+            else:
+                x_normalized = (x_fit - x_center) / x_scale
+            
             with warnings.catch_warnings():
                 # warnings.simplefilter("ignore", np.RankWarning)
-                coeffs = np.polyfit(x_fit, y_fit, degree).astype(np.float32)
+                # warnings.filterwarnings('ignore', message='Polyfit may be poorly conditioned')
+                
+                # Fit polynomial on normalized coordinates
+                coeffs_norm = np.polyfit(x_normalized, y_fit, degree)
+                
+                # Convert coefficients back to original coordinate system
+                # We need to transform polynomial p(x_norm) to p((x - x_center)/x_scale)
+                coeffs = np.zeros(degree + 1, dtype=np.float64)
+                
+                # Use binomial expansion to convert coefficients
+                for j in range(degree + 1):
+                    # For each power in the normalized polynomial
+                    poly_power = degree - j
+                    coeff_norm = coeffs_norm[j]
+                    
+                    # Expand (x/x_scale - x_center/x_scale)^poly_power
+                    # This is equivalent to ((x - x_center)/x_scale)^poly_power
+                    for k in range(poly_power + 1):
+                        # Binomial coefficient
+                        binom = math.factorial(poly_power) / (math.factorial(k) * math.factorial(poly_power - k))
+                        # Contribution to x^k term
+                        contrib = coeff_norm * binom * ((-x_center/x_scale) ** (poly_power - k)) / (x_scale ** k)
+                        coeffs[degree - k] += contrib
+                
+                coeffs = coeffs.astype(np.float32)
         else:
-            # If no points in this segment, use zero coefficients
+            # If no points or too few points in this segment, use zero coefficients or constant
+            print(f"[WARNING] Not enough points to fit polynomial in segment {i}: {len(x_fit)} points")
             coeffs = np.zeros(degree + 1, dtype=np.float32)
+            if len(y_fit) > 0:
+                coeffs[-1] = np.mean(y_fit)  # Use mean value as constant term
         
         # Store original bounds (not extended) for evaluation
         pieces.append(((lo, hi), coeffs))
@@ -180,6 +225,7 @@ def compute_integer_coefficients(float_pieces, scaling_factor, N, device, verbos
         scaling_factor: Scaling factor for integer conversion
         N: Bit shift for integer representation
         device: PyTorch device to place tensors on
+        verbose: If True, print bitwidth information
     
     Returns:
         Tuple of (lo_bounds, hi_bounds, coeffs_tensor)
@@ -254,7 +300,7 @@ def evaluate_piecewise_polynomial(x_int, lo_bounds, hi_bounds, coeffs_tensor, se
         Output tensor with polynomial evaluation results
     """
     # Initialize output
-    y_int = torch.zeros_like(x_int, dtype=torch.float32)
+    y_int = torch.zeros_like(x_int, dtype=torch.int32)
 
     # Evaluate polynomial for each segment
     for i in range(segments):
