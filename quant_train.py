@@ -427,7 +427,6 @@ def main():
         train_loss = train(args, train_loader, model, criterion, optimizer, epoch,
               loss_scaler, args.clip_grad, model_ema, mixup_fn, device)
         lr_scheduler.step(epoch)
-
         # if args.output_dir:  # this is for resume training
         #     checkpoint_path = os.path.join(args.output_dir, 'checkpoint.pth.tar')
         #     torch.save({
@@ -439,9 +438,19 @@ def main():
         #         'scaler': loss_scaler.state_dict(),
         #         'args': args,
         #     }, checkpoint_path)
-
-        acc1 = validate(args, val_loader, model, criterion_v, device)
         
+        acc1_model = validate(args, val_loader, model, criterion_v, device)
+        acc1_ema = None
+        if model_ema is not None:
+            acc1_ema = validate(args, val_loader, model_ema.ema, criterion_v, device)
+            logging.info(f'Acc@1 base: {acc1_model:.4f} | Acc@1 EMA: {acc1_ema:.4f}')
+        else:
+            logging.info(f'Acc@1 base: {acc1_model:.4f}')
+
+        # Pick the better accuracy this epoch
+        acc_candidates = [acc1_model] + ([acc1_ema] if acc1_ema is not None else [])
+        acc_this_epoch = max(acc_candidates)
+
         # Calculate epoch time and ETA
         epoch_time = time.time() - epoch_start_time
         epoch_times.append(epoch_time)
@@ -455,23 +464,34 @@ def main():
 
         #  WandB logging per epoch
         if not args.no_wandb:
-            wandb.log({
+            log_dict = {
                 'epoch': epoch,
                 'train_loss_epoch': train_loss,
-                'val_acc1': acc1,
+                'val_acc1_base': acc1_model,
                 'lr': optimizer.param_groups[0]['lr'],
                 'epoch_time': epoch_time,
                 'eta_seconds': eta_seconds
-            })
+            }
+            if acc1_ema is not None:
+                log_dict['val_acc1_ema'] = acc1_ema
+            wandb.log(log_dict)
 
-        # remember best acc@1 and save checkpoint
-        is_best = acc1 > args.best_acc1
-        args.best_acc1 = max(acc1, args.best_acc1)
+        # remember best acc@1 and save checkpoint (from best of base/EMA)
+        is_best = acc_this_epoch > args.best_acc1
+        args.best_acc1 = max(acc_this_epoch, args.best_acc1)
         if is_best:
             # record the best epoch
             best_epoch = epoch
             # save checkpoint with unique run_id
             ckpt_path = os.path.join(args.output_dir, f'checkpoint_{run_id}.pth.tar')
+            
+            # Choose which model weights to save
+            if acc1_ema is not None and acc1_ema >= acc1_model:
+                best_state_dict = model_ema.ema.state_dict()
+                best_is_ema = True
+            else:
+                best_state_dict = model.state_dict()
+                best_is_ema = False
             
             # Create model config to save with checkpoint
             model_config = {
@@ -495,16 +515,15 @@ def main():
             
             # Save checkpoint with model config
             torch.save({
-                'model': model.state_dict(),
+                'model': best_state_dict,
                 'model_config': model_config,
                 'epoch': epoch,
                 'best_acc1': args.best_acc1,
                 'args': vars(args)  # Save all args for reference
             }, ckpt_path)
             
-        logging.info(f'Acc at epoch {epoch}: {acc1}')
+        logging.info(f'Acc at epoch {epoch}: base={acc1_model:.4f}' + (f', ema={acc1_ema:.4f}' if acc1_ema is not None else ''))
         logging.info(f'Best acc at epoch {best_epoch}: {args.best_acc1}')
-
 
 def train(args, train_loader, model, criterion, optimizer, epoch, loss_scaler, max_norm, model_ema, mixup_fn, device):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -674,7 +693,6 @@ class ProgressMeter(object):
         num_digits = len(str(num_batches // 1))
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
-
 
 
 if __name__ == "__main__":
