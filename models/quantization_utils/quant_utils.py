@@ -148,7 +148,7 @@ class round_ste(Function):
         return grad_output.clone()
 
 
-def batch_frexp(inputs, max_bit=31):
+def batch_frexp(inputs, max_bit=7):
     """
     Decompose the scaling factor into mantissa and twos exponent.
     Parameters:

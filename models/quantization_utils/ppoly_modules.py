@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from scipy.special import erf
-from .quant_utils import floor_ste
+from .quant_utils import floor_ste, round_ste
 from .ibert_modules import IBERTIntGELU
 from .quant_modules import QuantAct
 from .ppoly_backend import fit_piecewise_polynomials, compute_integer_coefficients, evaluate_piecewise_polynomial
@@ -17,9 +17,10 @@ class PPolyIntGELU(nn.Module):
     Uses float GELU for gradient computation to avoid OOM issues
     """
     
-    def __init__(self, output_bit=8, scale_bits=22, seg=16, deg=2, backend='ibert', alpha=0.0, optim_bounds=True):
+    def __init__(self, output_bit=8, scale_bits=22, seg=16, deg=2, backend='ibert', alpha=0.0, optim_bounds=False):
         super(PPolyIntGELU, self).__init__()
         self.N = scale_bits  # Bit shift for integer representation
+        self.output_bit = output_bit
         self.segments = seg
         self.degree = deg
         self.backend = backend  # 'ibert' or 'float'
@@ -93,8 +94,12 @@ class PPolyIntGELU(nn.Module):
             scaling_factor_out = scaling_factor_out * (2**n)
             scaling_factor_out = scaling_factor * scaling_factor_out / 2
         else:   
-            scaling_factor_out = scaling_factor / (2 ** self.N)
-        
+            # match FloatGELU behavior
+            scaling_factor_out = torch.tensor(1.0 / (2 ** self.N), device=x.device, dtype=scaling_factor.dtype)
+
+        # TODO fix override
+        scaling_factor_out = torch.tensor(1.0 / (2 ** self.N), device=x.device, dtype=scaling_factor.dtype)
+
         self.fixed_lo_bounds = lo_bounds
         self.fixed_hi_bounds = hi_bounds
         self.fixed_coeffs = coeffs_tensor
@@ -106,7 +111,7 @@ class PPolyIntGELU(nn.Module):
         """Evaluate piecewise polynomial for integer inputs with float GELU gradients."""
         
         # Convert input to integer representation
-        x_int = floor_ste.apply(x / scaling_factor)
+        x_int = round_ste.apply(x / scaling_factor)
         
         # Get integer coefficients - either compute fresh or use stored
         with torch.no_grad():
@@ -128,15 +133,15 @@ class PPolyIntGELU(nn.Module):
         y_float_gelu = self.gelu_module(x)
         
         # Convert integer result back to float
-        y_float = y_int / (2 ** self.N)
+        y_float1 = y_int * scaling_factor_out
         
         # Replace forward with integer computation but use float GELU derivatives
-        y_float = y_float.detach() + (y_float_gelu - y_float_gelu.detach())
+        # y_float = y_float.detach() + (y_float_gelu - y_float_gelu.detach())
         
         # Ensure output is quantized
-        y_float = scaling_factor_out * floor_ste.apply(y_float/scaling_factor_out)
+        # y_float = scaling_factor_out * floor_ste.apply(y_float1/scaling_factor_out)
 
-        return y_float, scaling_factor_out
+        return y_float1, scaling_factor_out
     
 class PPolyIntSoftmax(nn.Module):
     """
@@ -292,7 +297,7 @@ class PPolyIntSoftmax(nn.Module):
         scaling_factor = scaling_factor.to(device)
         
         # Convert to integer representation
-        x_int = floor_ste.apply(x / scaling_factor)
+        x_int = round_ste.apply(x / scaling_factor)
         
         # Subtract max for numerical stability
         x_int_max, _ = x_int.max(dim=-1, keepdim=True)
@@ -323,10 +328,10 @@ class PPolyIntSoftmax(nn.Module):
         softmax_int_float = softmax_int * scaling_factor_out
         
         # Replace forward with integer computation but use float softmax derivatives
-        output = softmax_int_float.detach() + (softmax_float - softmax_float.detach())
-        
+        # output = softmax_int_float.detach() + (softmax_float - softmax_float.detach())
+        output = softmax_int_float
         # Ensure output is quantized
-        output = scaling_factor_out * floor_ste.apply(output / scaling_factor_out)
+        # output = scaling_factor_out * floor_ste.apply(output / scaling_factor_out)
         
         if return_exp_debug:
             with torch.no_grad():

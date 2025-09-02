@@ -300,7 +300,7 @@ def evaluate_piecewise_polynomial(x_int, lo_bounds, hi_bounds, coeffs_tensor, se
         Output tensor with polynomial evaluation results
     """
     # Initialize output
-    y_int = torch.zeros_like(x_int, dtype=torch.int32)
+    y_int = torch.zeros_like(x_int, dtype=torch.float32)
 
     # Evaluate polynomial for each segment
     for i in range(segments):
