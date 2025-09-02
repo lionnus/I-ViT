@@ -148,31 +148,61 @@ class round_ste(Function):
         return grad_output.clone()
 
 
-def batch_frexp(inputs, max_bit=7):
+def batch_frexp(inputs, max_bit=7, accuracy_threshold=1e-1, validate=False):
     """
     Decompose the scaling factor into mantissa and twos exponent.
+    Uses a single exponent (max) for all values and adjusts mantissas accordingly.
     Parameters:
     ----------
     inputs: scaling factor
-    return: (mantissa, exponent)
+    accuracy_threshold: maximum allowed relative error (default: 1e-3 = 0.1%)
+    return: (mantissa, single_exponent)
     """
-
+    # TODO: Flag for per channel shift or global shift
     shape_of_input = inputs.size()
 
     # trans the input to be a 1-d tensor
-    inputs = inputs.view(-1)
+    inputs_flat = inputs.view(-1)
 
-    output_m, output_e = np.frexp(inputs.cpu().numpy())
+    output_m, output_e = np.frexp(inputs_flat.cpu().numpy())
+    
+    # Use maximum exponent for all values
+    max_output_e = np.max(output_e)
+    
+    # Calculate the single output exponent 
+    single_exponent = float(max_bit) - max_output_e
+    
+    # Adjust mantissas based on the single max exponent
     tmp_m = []
-    for m in output_m:
-        int_m_shifted = int(Decimal(m * (2 ** max_bit)).quantize(Decimal('1'),
-                                                                 rounding=decimal.ROUND_HALF_UP))
+    for i, (m, e) in enumerate(zip(output_m, output_e)):
+        # For frexp: input = m * 2^e, where 0.5 <= m < 1.0
+        # input = adjusted_m * 2^max_output_e
+        # Gives adjusted_m = m * 2^(e - max_output_e)
+        exponent_diff = e - max_output_e
+        adjusted_m = m * (2.0 ** exponent_diff)
+        
+        # Scale and round the adjusted mantissa
+        int_m_shifted = int(Decimal(adjusted_m * (2 ** max_bit)).quantize(Decimal('1'),
+                                                                          rounding=decimal.ROUND_HALF_UP))
         tmp_m.append(int_m_shifted)
+    
     output_m = np.array(tmp_m)
 
-    output_e = float(max_bit) - output_e
-    return torch.from_numpy(output_m).cuda(device=inputs.device).view(shape_of_input), \
-           torch.from_numpy(output_e).cuda(device=inputs.device).view(shape_of_input)
+    # Validate accuracy
+    if validate:
+        reconstructed = output_m / (2.0 ** single_exponent)
+        original_values = inputs_flat.cpu().numpy()
+        relative_error = np.abs((reconstructed - original_values) / (original_values + 1e-12))
+        max_error = np.max(relative_error)
+
+        if max_error > accuracy_threshold:
+            print(f"WARNING: batch_frexp accuracy loss detected. Max relative error: {max_error:.6f} "
+                f"(threshold: {accuracy_threshold:.6f}). Consider adjusting max_bit parameter.")
+
+    mantissa_tensor = torch.from_numpy(output_m).cuda(device=inputs.device).view(shape_of_input)
+    exponent_tensor = torch.tensor(single_exponent, dtype=torch.float).cuda(device=inputs.device)
+    
+    return mantissa_tensor, exponent_tensor
 
 
 class fixedpoint_mul(Function):
