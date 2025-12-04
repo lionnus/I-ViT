@@ -27,7 +27,7 @@
                 "8","8","8","8","8","8","8", // patchembed, pos enc, attention out, softmax out, mlp out, norm 2 in, attention block out
             ],
             "justMyCode": false,
-            "python": "${workspaceFolder}/myenv/bin/python"
+            "python": "${workspaceFolder}/venv/bin/python"
         },
         {
             "name": "scripts/inference.py single image 8 bit",
@@ -43,7 +43,7 @@
                 "--weights",
                 "results_deit-t_ivitbert_8bit/checkpoint.pth.tar"
             ],
-            "python": "${workspaceFolder}/myenv/bin/python"
+            "python": "${workspaceFolder}/venv/bin/python"
         },
         {
             "name": "scripts/inference.py single image 16 bit",
@@ -59,7 +59,7 @@
                 "--weights",
                 "results_deit-t_16bit/checkpoint.pth.tar"
             ],
-            "python": "${workspaceFolder}/myenv/bin/python"
+            "python": "${workspaceFolder}/venv/bin/python"
         },
         {
             "name": "onnx_inference.py",
@@ -77,7 +77,7 @@
                 "--onnx",
                 "${input:onnxModel}"
             ],
-            "python": "${workspaceFolder}/myenv/bin/python"
+            "python": "${workspaceFolder}/venv/bin/python"
         },
         {
             "name": "scripts/inference.py evaluate latest",
@@ -95,7 +95,7 @@
                 "--data-path",
                 "/scratch2/ml_datasets/ILSVRC2012",
             ],
-            "python": "${workspaceFolder}/myenv/bin/python"
+            "python": "${workspaceFolder}/venv/bin/python"
         },
         {
             "name": "scripts/inference.py evaluate 8bit",
@@ -108,12 +108,19 @@
                 "128",
                 "--device",
                 "cuda:3",
+                "--gelu",
+                "ibert",
+                "--softmax",
+                "ibert",
+                "--layernorm",
+                "ibert",
                 "--weights",
-                "results_deit-t_8bit/checkpoint.pth.tar",
+                "results/checkpoint_a04a495ac414499c86b097ded7fc1b7a.pth.tar",
                 "--data-path",
-                "/scratch2/ml_datasets/ILSVRC2012",
+                "/scratch/ml_datasets/ILSVRC2012",
+                "--no-io-stats",
             ],
-            "python": "${workspaceFolder}/myenv/bin/python"
+            "python": "${workspaceFolder}/venv/bin/python"
         },
         {
             "name": "scripts/inference.py evaluate 16bit",
@@ -128,10 +135,16 @@
                 "cuda:2",
                 "--weights",
                 "results_deit-t_16bit/checkpoint.pth.tar",
+                "--gelu",
+                "ibert",
+                "--softmax",
+                "ibert",
+                "--layernorm",
+                "ibert",
                 "--data-path",
                 "/scratch2/ml_datasets/ILSVRC2012",
             ],
-            "python": "${workspaceFolder}/myenv/bin/python"
+            "python": "${workspaceFolder}/venv/bin/python"
         },
         {
             "name": "softmax_approx_analysis.py external data and scale",
@@ -147,7 +160,7 @@
                 "--shape",
                 "128,3,197,197"
             ],
-            "python": "${workspaceFolder}/myenv/bin/python"
+            "python": "${workspaceFolder}/venv/bin/python"
         },
         {
             "name": "Python Debugger: Current File with Arguments",

@@ -17,7 +17,8 @@ from .quant_utils import *
 # -------------------------------------------------------------------------
 #                           I/O-stat collector
 # -------------------------------------------------------------------------
-_LAYER_IO_STATS = []        # global buffer (unchanged)
+_LAYER_IO_STATS = []        # global buffer
+_IO_STATS_ENABLED = True    # global enable/disable flag
 
 def _collect_io_stats(module, inputs, output, module_name):
     """
@@ -25,6 +26,8 @@ def _collect_io_stats(module, inputs, output, module_name):
     For layers with two runtime inputs (e.g. QuantMatMul) it also logs
     per-input min/max + shape.
     """
+    if not _IO_STATS_ENABLED:
+        return
     try:
         # ----------- unpack main in/out tensors & scales -----------
         x_scaled = inputs[0]
@@ -84,6 +87,24 @@ def attach_io_stat_hooks(model: nn.Module):
         if module is model:  # skip the top-level container to avoid double-logging
             continue
         module.register_forward_hook(partial(_collect_io_stats, module_name=name))
+
+
+def enable_io_stats():
+    """Enable I/O statistics collection."""
+    global _IO_STATS_ENABLED
+    _IO_STATS_ENABLED = True
+
+
+def disable_io_stats():
+    """Disable I/O statistics collection."""
+    global _IO_STATS_ENABLED
+    _IO_STATS_ENABLED = False
+
+
+def clear_io_stats():
+    """Clear all collected I/O statistics."""
+    global _LAYER_IO_STATS
+    _LAYER_IO_STATS.clear()
 
 
 def get_io_stats_df() -> pd.DataFrame:

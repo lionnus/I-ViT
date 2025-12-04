@@ -256,6 +256,8 @@ def main():
                     help="Export the model to ONNX and exit (path to *.onnx)")
     ap.add_argument("--ort", action="store_true",
                     help="Run ORT extended graph fusions on the exported ONNX model")
+    ap.add_argument("--no-io-stats", action="store_true",
+                    help="Disable I/O statistics collection (improves performance)")
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -302,7 +304,11 @@ def main():
         return
     
     # Attach IO stat hooks to the model
-    attach_io_stat_hooks(model)
+    if not args.no_io_stats:
+        attach_io_stat_hooks(model)
+    else:
+        print("I/O statistics collection disabled")
+        disable_io_stats()
     
 
     # Dataset eval
@@ -329,7 +335,10 @@ def main():
     print(time.strftime("%Y-%m-%d %H:%M:%S"), "Starting evaluation ...")
     top1, top5 = evaluate_dataset(model, loader, device, print_batch_stats=True)
     print(f"Validation set: Top-1 = {top1:.2f}%  |  Top-5 = {top5:.2f}%")
-    save_io_stats_df("io_stats_val.pkl", to_csv=True)
+    
+    if not args.no_io_stats:
+        save_io_stats_df("io_stats_val.pkl", to_csv=True)
+    
     print(time.strftime("%Y-%m-%d %H:%M:%S"), "Evaluation finished.")
 
 if __name__ == "__main__":
