@@ -331,6 +331,6 @@ def evaluate_piecewise_polynomial(x_int, lo_bounds, hi_bounds, coeffs_tensor, se
                 print(f"[WARNING] Add accumulator exceeds {ACCUMULATOR_BITWIDTH} bits signed in segment {i}, degree {idx}")
             r = r_add
 
-        y_int[mask_i] = r
+        y_int[mask_i] = r.to(torch.int32)
 
     return y_int
