@@ -1,77 +1,26 @@
-annotated-types==0.7.0
-certifi==2025.1.31
-charset-normalizer==3.4.1
-click==8.2.0
-coloredlogs==15.0.1
-contourpy==1.3.2
-cycler==0.12.1
-docker-pycreds==0.4.0
-filelock==3.18.0
-flatbuffers==25.2.10
-fonttools==4.57.0
-fsspec==2025.3.2
-gitdb==4.0.12
-GitPython==3.1.44
-huggingface-hub==0.30.1
-humanfriendly==10.0
-idna==3.10
-Jinja2==3.1.6
-kiwisolver==1.4.8
-markdown-it-py==3.0.0
-MarkupSafe==3.0.2
-matplotlib==3.10.1
-mdurl==0.1.2
-mpmath==1.3.0
-networkx==3.4.2
-numpy==2.2.4
-nvidia-cublas-cu12==12.4.5.8
-nvidia-cuda-cupti-cu12==12.4.127
-nvidia-cuda-nvrtc-cu12==12.4.127
-nvidia-cuda-runtime-cu12==12.4.127
-nvidia-cudnn-cu12==9.1.0.70
-nvidia-cufft-cu12==11.2.1.3
-nvidia-curand-cu12==10.3.5.147
-nvidia-cusolver-cu12==11.6.1.9
-nvidia-cusparse-cu12==12.3.1.170
-nvidia-cusparselt-cu12==0.6.2
-nvidia-nccl-cu12==2.21.5
-nvidia-nvjitlink-cu12==12.4.127
-nvidia-nvtx-cu12==12.4.127
-onnx==1.17.0
-onnx-simplifier==0.4.36
-onnx_graphsurgeon==0.5.8
-onnxoptimizer==0.3.13
-onnxruntime==1.21.1
-packaging==24.2
-pandas==2.2.3
-pillow==11.1.0
-platformdirs==4.3.8
-protobuf==6.30.2
-psutil==7.0.0
-pydantic==2.11.4
-pydantic_core==2.33.2
-Pygments==2.19.1
-pyparsing==3.2.3
-python-dateutil==2.9.0.post0
-pytz==2025.2
-PyYAML==6.0.2
-requests==2.32.3
-rich==14.0.0
-safetensors==0.5.3
-scipy==1.15.2
-sentry-sdk==2.28.0
-setproctitle==1.3.6
-six==1.17.0
-smmap==5.0.2
-sympy==1.13.1
-tabulate==0.9.0
-timm==0.9.16
-torch==2.6.0
-torchvision==0.21.0
-tqdm==4.67.1
-triton==3.2.0
-typing-inspection==0.4.0
-typing_extensions==4.13.1
-tzdata==2025.2
-urllib3==2.3.0
-wandb==0.19.11
+# Core deep learning
+# PyTorch 2.1.2 with CUDA 11.8 - last version supporting GTX 1080 Ti (sm_61)
+--index-url https://download.pytorch.org/whl/cu118
+torch==2.1.2 # for 1080Ti GPU
+torchvision==0.16.2
+numpy>=1.24.0,<2.0.0
+
+# Vision Transformers and Training
+timm>=0.9.0
+
+# Logging and Tracking
+wandb>=0.15.0
+
+# Data Processing and Analysis
+pandas>=2.0.0
+pillow>=10.0.0
+scipy>=1.10.0
+
+# Visualization (for analysis scripts)
+matplotlib>=3.7.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# ONNX support (optional, for onnx_inference.py)
+onnxruntime>=1.15.0
