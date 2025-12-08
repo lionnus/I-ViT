@@ -1,26 +1,27 @@
 # Core deep learning
 # PyTorch 2.1.2 with CUDA 11.8 - last version supporting GTX 1080 Ti (sm_61)
---index-url https://download.pytorch.org/whl/cu118
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cu118
 torch==2.1.2 # for 1080Ti GPU
 torchvision==0.16.2
-numpy>=1.24.0,<2.0.0
+numpy==1.26.3
 
-# Vision Transformers and Training
-timm>=0.9.0
+# Vision Transformers
+timm>=1.0.22
 
 # Logging and Tracking
-wandb>=0.15.0
+wandb>=0.23.1
 
 # Data Processing and Analysis
-pandas>=2.0.0
-pillow>=10.0.0
-scipy>=1.10.0
+pandas>=2.3.3
+pillow>=12.0.0
+scipy>=1.16.3
 
-# Visualization (for analysis scripts)
-matplotlib>=3.7.0
+# Visualization
+matplotlib>=3.10.7
 
 # Progress bars
-tqdm>=4.65.0
+tqdm>=4.67.1
 
 # ONNX support (optional, for onnx_inference.py)
-onnxruntime>=1.15.0
+onnxruntime>=1.23.2
