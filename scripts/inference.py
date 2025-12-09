@@ -322,10 +322,10 @@ def main():
     print(f"Evaluating on validation set: {val_dir}")
     
     tf = T.Compose([
-        T.Resize(int(224 * 1.14)),
+        T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
         T.CenterCrop(224),
         T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        T.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
     ])
 
     val_data = torchvision.datasets.ImageFolder(val_dir, transform=tf)
