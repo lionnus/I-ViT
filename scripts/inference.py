@@ -155,20 +155,9 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
     freeze_model(model)
     return model
 
-def preprocess_image(path: Path | str) -> torch.Tensor:
-    """Load and normalise a single image for DeiT-tiny (224by224)."""
-    tf = T.Compose([
-        T.Resize(int(224 * 1.14)),
-        T.CenterCrop(224),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    img = Image.open(path).convert("RGB")
-    return tf(img)
-
 
 # -----------------------------------------------------------------------------
-#  Evaluation / inference helpers
+#  Evaluation helpers
 # -----------------------------------------------------------------------------
 
 def evaluate_dataset(model, data_loader, device, *, print_batch_stats: bool = True):
@@ -209,28 +198,12 @@ def evaluate_dataset(model, data_loader, device, *, print_batch_stats: bool = Tr
     return 100 * correct1 / tot, 100 * correct5 / tot
 
 
-def predict_single(model, img: torch.Tensor, device, labels_map: dict[int, str] | None):
-    """Run forward pass on *one* image tensor and print Top-5."""
-    model.eval()
-    start = time.perf_counter()
-    with torch.no_grad():
-        logits = model(img.unsqueeze(0).to(device))
-        probs = F.softmax(logits, dim=1)[0]
-        top5_prob, top5_idx = probs.topk(5)
-    latency = (time.perf_counter() - start) * 1000
-
-    print("Top-5 predictions (latency = {:.1f} ms):".format(latency))
-    for rank, (p, idx) in enumerate(zip(top5_prob.tolist(), top5_idx.tolist()), 1):
-        label = labels_map.get(idx, str(idx)) if labels_map else str(idx)
-        print(f"  #{rank}: class {idx:4} - {label:<25}  |  p={p:.4f}")
-
-
 # -----------------------------------------------------------------------------
 #  CLI / entry-point
 # -----------------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="Evaluate DeiT-tiny or run single-image inference")
+    ap = argparse.ArgumentParser(description="Evaluate DeiT-tiny on ImageNet validation set")
     ap.add_argument("--weights", default="results/checkpoint.pth.tar",
                     help="Path to model checkpoint (*.pth.tar)")
     ap.add_argument("--device", default="cuda:1",
@@ -238,7 +211,7 @@ def main():
 
     # Dataset config
     ap.add_argument("--data-path", default=None,
-                    help="Path to ImageNet root containing 'val'. If omitted and --single-image is not set, script aborts.")
+                    help="Path to ImageNet root containing 'val'.")
     ap.add_argument("--batch-size", type=int, default=128, help="Validation batch size")
     
     # Model configuration overrides
