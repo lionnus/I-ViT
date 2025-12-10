@@ -48,7 +48,7 @@ parser.add_argument('--output-dir', type=str, default='results/',
                     help='path to save log and quantized model')
 
 parser.add_argument('--resume', default='', help='resume from checkpoint')
-parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
+parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='start epoch')
 parser.add_argument('--batch-size', default=128, type=int)
 parser.add_argument('--eff-batch-size', default=None, type=int,
@@ -163,7 +163,7 @@ parser.add_argument('--layernorm', default='ibert',
                     help='LayerNorm implementation to use')
 # Alternative to set all three at once
 parser.add_argument(
-    '--layer_type',
+    '--layer-type',
     choices=['ivit','ibert'],
     default=None,
     help='If set, use this implementation for GELU, Softmax, and LayerNorm. Overrides --gelu, --softmax, and --layernorm.'
@@ -246,8 +246,17 @@ def calibrate_model(model, train_loader, num_batches=100, device='cuda'):
 def main():
     args = parser.parse_args()
 
-    # generate a unique identifier for this run
-    run_id = uuid.uuid4().hex
+    # generate a unique identifier for this run (only if not resuming)
+    if args.resume:
+        # Try to extract run_id from checkpoint filename or generate new one
+        resume_path = Path(args.resume)
+        if 'checkpoint_' in resume_path.name:
+            # Extract run_id from filename like checkpoint_abc123.pth.tar
+            run_id = resume_path.name.replace('checkpoint_', '').split('.')[0]
+        else:
+            run_id = uuid.uuid4().hex
+    else:
+        run_id = uuid.uuid4().hex
     args.run_id = run_id
 
     seed = args.seed
@@ -336,18 +345,21 @@ def main():
 
     model.to(device)
     
-    # Perform calibration before setting up training
-    if args.calibration_epochs > 0:
+    # Perform calibration before setting up training (skip if resuming)
+    if args.calibration_epochs > 0 and not args.resume:
         model = calibrate_model(model, train_loader, 
                               num_batches=args.calibration_batches, 
                               device=device)
-        # Weights & Biases init
+        
+    # Weights & Biases init
     if not args.no_wandb:
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=args.wandb_run_name,
-            config=vars(args)
+            config=vars(args),
+            resume='allow' if args.resume else None,
+            id=run_id if args.resume else None
         )
         # Explicitly store bit-widths and layer types for easy filtering
         wandb.config.update({
@@ -390,6 +402,7 @@ def main():
         criterion = nn.CrossEntropyLoss()
     criterion_v = nn.CrossEntropyLoss()
 
+    # Resume from checkpoint
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -397,18 +410,40 @@ def main():
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
         model.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+        # Full resume with optimizer/scheduler state
+        if 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
-            if args.model_ema:
-                load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
-            if 'scaler' in checkpoint:
+            
+            if args.model_ema and 'model_ema' in checkpoint and checkpoint['model_ema'] is not None:
+                model_ema.ema.load_state_dict(checkpoint['model_ema'])
+            
+            if 'scaler' in checkpoint and checkpoint['scaler'] is not None:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
-        lr_scheduler.step(args.start_epoch)
+            
+            logging.info(f"Full resume: loaded optimizer and scheduler state")
+        else:
+            # Partial resume - weights only, advance scheduler to match epoch
+            logging.warning("Checkpoint missing optimizer/scheduler state - loading weights only")
+        
+        # Set start epoch from checkpoint or command line
+        if 'epoch' in checkpoint and args.start_epoch == 0:
+            args.start_epoch = checkpoint['epoch'] + 1
+            logging.info(f"Resuming from epoch {args.start_epoch}")
+        
+        # Restore best accuracy
+        if 'best_acc1' in checkpoint:
+            args.best_acc1 = checkpoint['best_acc1']
+            logging.info(f"Best accuracy so far: {args.best_acc1:.2f}")
+        
+        # Step scheduler to correct position
+        for _ in range(args.start_epoch):
+            lr_scheduler.step(_)
+        
+        logging.info(f"LR after resume: {optimizer.param_groups[0]['lr']}")
 
     print(f"Start training for {args.epochs} epochs")
-    best_epoch = 0
+    best_epoch = args.start_epoch if args.best_acc1 > 0 else 0
     
     # Initialize timing variables
     epoch_times = []
@@ -416,7 +451,7 @@ def main():
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start_time = time.time()
         
-        # Unfix quantization parameters after first epoch
+        # Unfix quantization parameters after calibration epochs
         if epoch == args.calibration_epochs:
             logging.info(f"Unfixing quantization parameters at epoch {epoch}")
             for module in model.modules():
@@ -428,17 +463,41 @@ def main():
               loss_scaler, args.clip_grad, model_ema, mixup_fn, device)
         lr_scheduler.step(epoch)
 
-        # if args.output_dir:  # this is for resume training
-        #     checkpoint_path = os.path.join(args.output_dir, 'checkpoint.pth.tar')
-        #     torch.save({
-        #         'model': model.state_dict(),
-        #         'optimizer': optimizer.state_dict(),
-        #         'lr_scheduler': lr_scheduler.state_dict(),
-        #         'epoch': epoch,
-        #         'model_ema': get_state_dict(model_ema),
-        #         'scaler': loss_scaler.state_dict(),
-        #         'args': args,
-        #     }, checkpoint_path)
+        # Save checkpoint for resume (every epoch)
+        if args.output_dir:
+            checkpoint_path = os.path.join(args.output_dir, f'checkpoint_{run_id}.pth.tar')
+            
+            # Create model config to save with checkpoint
+            model_config = {
+                'model_name': args.model,
+                'num_classes': args.nb_classes,
+                'drop_rate': args.drop,
+                'drop_path_rate': args.drop_path,
+                'quant_bitwidths': args.quant_bitwidths,
+                'patch_embed_bw': patch_embed_bw,
+                'pos_encoding_bw': pos_encoding_bw,
+                'block_input_bw': block_input_bw,
+                'attention_out_bw': attention_out_bw,
+                'softmax_bw': softmax_bw,
+                'mlp_out_bw': mlp_out_bw,
+                'norm2_in_bw': norm2_in_bw,
+                'att_block_out_bw': att_block_out_bw,
+                'gelu_type': args.gelu,
+                'softmax_type': args.softmax,
+                'layernorm_type': args.layernorm
+            }
+            
+            torch.save({
+                'model': model.state_dict(),
+                'model_config': model_config,
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'model_ema': get_state_dict(model_ema) if model_ema is not None else None,
+                'scaler': loss_scaler.state_dict(),
+                'best_acc1': args.best_acc1,
+                'args': vars(args)
+            }, checkpoint_path)
 
         acc1 = validate(args, val_loader, model, criterion_v, device)
         
@@ -470,8 +529,8 @@ def main():
         if is_best:
             # record the best epoch
             best_epoch = epoch
-            # save checkpoint with unique run_id
-            ckpt_path = os.path.join(args.output_dir, f'checkpoint_{run_id}.pth.tar')
+            # save best checkpoint separately
+            best_ckpt_path = os.path.join(args.output_dir, f'best_{run_id}.pth.tar')
             
             # Create model config to save with checkpoint
             model_config = {
@@ -493,14 +552,18 @@ def main():
                 'layernorm_type': args.layernorm
             }
             
-            # Save checkpoint with model config
+            # Save best checkpoint with full state
             torch.save({
                 'model': model.state_dict(),
                 'model_config': model_config,
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,
+                'model_ema': get_state_dict(model_ema) if model_ema is not None else None,
+                'scaler': loss_scaler.state_dict(),
                 'best_acc1': args.best_acc1,
-                'args': vars(args)  # Save all args for reference
-            }, ckpt_path)
+                'args': vars(args)
+            }, best_ckpt_path)
             
         logging.info(f'Acc at epoch {epoch}: {acc1}')
         logging.info(f'Best acc at epoch {best_epoch}: {args.best_acc1}')
