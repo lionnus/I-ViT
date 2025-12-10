@@ -218,25 +218,35 @@ class PPolyIntSoftmax(nn.Module):
     
     def _compute_integer_coefficients(self, x_int, scaling_factor):
         """Compute integer coefficients from float pieces and store if fixed"""
-        # Prepare data for fitting
-        x_lo_int = torch.floor(torch.min(x_int)).item()
-        x_hi_int = torch.ceil(torch.max(x_int)).item()
-        x_lo = x_lo_int * scaling_factor.cpu().numpy()
-        x_hi = x_hi_int * scaling_factor.cpu().numpy()
-
+        # The input x_int here is already offset by 128, in range [-127, 128]
+        # But we need to fit exp((x - 128) * scaling_factor) = exp(x_original * scaling_factor)
+        # TODO Parameterize
+        x_lo_int = -128  # Hardware constraint
+        x_hi_int = 127   # Hardware constraint
+        
+        # Approximating exp((x_int_offset - 127) * scaling_factor)
         if self.backend == 'ibert':
             # Use IBERT's integer exponential approximation
-            xs_int = torch.linspace(x_lo_int, x_hi_int, 10000, device=x_int.device, dtype=x_int.dtype)
-            ys_int, scaling_factor_out = self._ibert_int_exp(xs_int, scaling_factor)
+            xs_int_offset = torch.linspace(x_lo_int, x_hi_int, 10000, device=x_int.device, dtype=x_int.dtype)
+            # Remove offset to get original values for IBERT computation
+            xs_int_original = xs_int_offset - 127
+            ys_int, scaling_factor_out = self._ibert_int_exp(xs_int_original, scaling_factor)
             ys = ys_int * scaling_factor_out
-            xs_np = (xs_int*scaling_factor).detach().cpu().numpy()
+            # fit against the offset x values
+            xs_np = (xs_int_offset * scaling_factor).detach().cpu().numpy()
             ys_np = ys.detach().cpu().numpy()
         else:
             # Use float exponential function
-            xs_np = np.linspace(x_lo, x_hi, 10000)
-            ys_np = self._exp_func(xs_np)
-
-        # Fit float polynomial pieces using shared function with alpha parameter
+            xs_int_offset = np.linspace(x_lo_int, x_hi_int, 10000)
+            # Compute exp((x_offset - 127) * s) which is the actual function
+            xs_original = (xs_int_offset - 127) * scaling_factor.cpu().numpy()
+            ys_np = self._exp_func(xs_original)
+            xs_np = xs_int_offset * scaling_factor.cpu().numpy()
+        # Convert integer bounds to float
+        x_lo = x_lo_int * scaling_factor.cpu().numpy()
+        x_hi = x_hi_int * scaling_factor.cpu().numpy()
+        
+        # Fit float polynomial pieces
         float_pieces = fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, self.segments, self.degree, self.alpha, optim_bounds=self.optim_bounds)
         
         # Convert to integer representation
@@ -280,9 +290,12 @@ class PPolyIntSoftmax(nn.Module):
         s = scaling_factor.to(device)
         with torch.no_grad():
             x_int = floor_ste.apply(x / s)
-            x_int = x_int - x_int.max(dim=-1, keepdim=True).values
+            x_int = x_int - x_int.max(dim=-1, keepdim=True).values + 127  # Offset input
+            
             exp_int = self.int_exp_poly(x_int, s)
             exp_approx_float = exp_int / (2 ** self.N)
+            
+            # True exponential is still of the original x_int values
             exp_true_float = torch.exp(x_int.to(torch.float32) * s)
         return exp_approx_float, exp_true_float
 
@@ -296,9 +309,9 @@ class PPolyIntSoftmax(nn.Module):
         
         # Subtract max for numerical stability
         x_int_max, _ = x_int.max(dim=-1, keepdim=True)
-        x_int = x_int - x_int_max
-        
-        # Apply polynomial exponential approximation
+        x_int = x_int - x_int_max + 127  # Shift to avoid negative values
+
+        # Apply polynomial exponential approximation with offset input
         exp_int = self.int_exp_poly(x_int, scaling_factor)
         
         # Scale down to fit in output bit
