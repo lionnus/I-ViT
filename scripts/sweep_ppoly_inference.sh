@@ -15,12 +15,12 @@
 # =============================================================================
 
 # --- Configuration Parameters ---
-WEIGHTS_PATH="results/checkpoint_a04a495ac414499c86b097ded7fc1b7a.pth.tar"
-DATA_PATH="/scratch/ml_datasets/ILSVRC2012"
-DEVICE="cuda:3"
+WEIGHTS_PATH="results/checkpoint_9f32c5ad39174ff88e0107293039530c.pth.tar"
+DATA_PATH="/scratch2/ml_datasets/ILSVRC2012"
+DEVICE="cuda:2"
 BATCH_SIZE=128
-PYTHON_ENV="/scratch/msc25f5/I-ViT/venv/bin/python"
-WORKSPACE_DIR="/scratch/msc25f5/I-ViT"
+PYTHON_ENV="/scratch/lkesting/I-ViT/venv/bin/python"
+WORKSPACE_DIR="/scratch/lkesting/I-ViT"
 
 # --- Sweep Parameters ---
 DEGREES=(1 2)
@@ -31,7 +31,7 @@ LAYERNORM_TYPE="ibert"
 generate_type_string() {
     local degree=$1
     local segment=$2
-    echo "ppoly_deg_${degree}_seg_${segment}_scale-bits_30_backend_ibert"
+    echo "ppoly_deg_${degree}_seg_${segment}_scale-bits_24_backend_ibert"
 }
 
 # --- Main sweep function ---
@@ -88,14 +88,16 @@ run_sweep() {
                     # Run inference
                     start_time=$(date +%s)
                     
-                    "$PYTHON_ENV" -m inference \
+                    "$PYTHON_ENV" -m scripts.inference \
                         --weights "$WEIGHTS_PATH" \
                         --data-path "$DATA_PATH" \
                         --device "$DEVICE" \
                         --batch-size "$BATCH_SIZE" \
                         --gelu-type "$gelu_type" \
                         --softmax-type "$softmax_type" \
-                        --layernorm-type "$LAYERNORM_TYPE"
+                        --layernorm-type "$LAYERNORM_TYPE" \
+                        --use-random-warmup \
+                        --no-io-stats \
                     
                     exit_code=$?
                     end_time=$(date +%s)

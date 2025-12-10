@@ -30,10 +30,72 @@ torch.manual_seed(42)
 #  Helpers
 # -----------------------------------------------------------------------------
 
-def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None, softmax_type=None, layernorm_type=None, bitwidth=None):
+def calibrate_model(model, device, data_path: Path = None, num_batches: int = 10, batch_size: int = 128, use_random_calibration: bool = False):
+    """
+    Calibrate the model using either a dummy forward pass or training images.
+    
+    Args:
+        model: The model to calibrate
+        device: The device to run calibration on
+        data_path: Path to ImageNet root (required if use_random_calibration=False)
+        num_batches: Number of batches to use for calibration (ignored if use_random_calibration=True)
+        batch_size: Batch size for calibration (ignored if use_random_calibration=True)
+        use_random_calibration: If True, use single dummy forward pass; if False, use training images
+    """
+    model.eval()
+    
+    if use_random_calibration:
+        print("Performing dummy forward pass for model warmup...")
+        dummy_input = torch.randn(1, 3, 224, 224, device=device)
+        with torch.no_grad():
+            _ = model(dummy_input)
+        print("Dummy warmup complete.")
+    else:
+        if data_path is None:
+            raise ValueError("data_path is required when use_random_calibration=False")
+        
+        train_dir = data_path / "train"
+        if not train_dir.exists():
+            raise FileNotFoundError(f"Training directory '{train_dir}' not found. Required for calibration.")
+        
+        # Use same transforms as training (without augmentation)
+        tf = T.Compose([
+            T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
+            T.CenterCrop(224),
+            T.ToTensor(),
+            T.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        ])
+        
+        # Load training dataset
+        train_data = torchvision.datasets.ImageFolder(train_dir, transform=tf)
+        
+        # Create a subset with num_batches * batch_size samples (randomly selected)
+        num_images = num_batches * batch_size
+        indices = torch.randperm(len(train_data))[:num_images].tolist()
+        subset = torch.utils.data.Subset(train_data, indices)
+        
+        loader = DataLoader(
+            subset, 
+            batch_size=batch_size, 
+            shuffle=False,
+            num_workers=16, 
+            pin_memory=True
+        )
+        
+        print(f"Calibrating model with {num_batches} batches ({num_images} images) from training set...")
+        with torch.no_grad():
+            for imgs, _ in tqdm(loader, desc="Calibration", unit="batch", dynamic_ncols=True):
+                imgs = imgs.to(device)
+                _ = model(imgs)
+        
+        print("Calibration complete.")
+
+
+def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None, softmax_type=None, layernorm_type=None, bitwidth=None, calibration_path=None, num_calibration_batches=10, batch_size=128, strict_load=False, use_random_calibration_warmup=False):
     """
     Load the model with the given weights checkpoint, checks for configuration.
     Optional parameters override the saved configuration.
+    If strict_load is True, model loading will be strict and skip calibration warmup.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
@@ -142,14 +204,20 @@ def load_model(checkpoint_path, device='cuda', num_classes=1000, gelu_type=None,
             if param.shape == torch.Size([]) and model_state_dict[name].shape == torch.Size([1]):
                 checkpoint_weights[name] = param.unsqueeze(0)
     
-    model.load_state_dict(checkpoint_weights, strict=False)
+    model.load_state_dict(checkpoint_weights, strict=strict_load)
     model.to(device)
-    model.eval()
     
-    # One dummy forward pass to warm up the model
-    dummy_input = torch.randn(1, 3, 224, 224, device=device)
-    with torch.no_grad():
-        _ = model(dummy_input)
+    # Calibration warmup to set quantization scales (skip if strict_load is True)
+    if not strict_load:
+        model.eval()
+        if use_random_calibration_warmup:
+            calibrate_model(model, device, use_random_calibration=True)
+        elif calibration_path is not None:
+            calibrate_model(model, device, data_path=calibration_path, num_batches=num_calibration_batches, batch_size=batch_size, use_random_calibration=False)
+        else:
+            print("Warning: No calibration path provided and dummy warmup not enabled. Skipping calibration warmup.")
+    else:
+        print("Strict model loading enabled - skipping calibration warmup.")
     
     # Freeze the model to prevent further training
     freeze_model(model)
@@ -211,8 +279,12 @@ def main():
 
     # Dataset config
     ap.add_argument("--data-path", default=None,
-                    help="Path to ImageNet root containing 'val'.")
+                    help="Path to ImageNet root containing 'train' and 'val'.")
     ap.add_argument("--batch-size", type=int, default=128, help="Validation batch size")
+    
+    # Calibration config
+    ap.add_argument("--num-calibration-batches", type=int, default=10,
+                    help="Number of training batches to use for calibration warmup (default: 10)")
     
     # Model configuration overrides
     ap.add_argument("--gelu-type", default=None,
@@ -231,17 +303,31 @@ def main():
                     help="Run ORT extended graph fusions on the exported ONNX model")
     ap.add_argument("--no-io-stats", action="store_true",
                     help="Disable I/O statistics collection (improves performance)")
+    ap.add_argument("--strict-model-load", action="store_true",
+                    help="Enable strict model loading and skip calibration warmup")
+    ap.add_argument("--use-random-warmup", action="store_true",
+                    help="Use single dummy forward pass for warmup instead of training data calibration")
+    
     args = ap.parse_args()
 
     device = torch.device(args.device)
     
-    # Load model from checkpoint.
+    # Load model from checkpoint with calibration
     print(f"Loading checkpoint from: {args.weights}")
-    model = load_model(args.weights, device=device, num_classes=1000, 
-                      gelu_type=args.gelu_type, 
-                      softmax_type=args.softmax_type, 
-                      layernorm_type=args.layernorm_type,
-                      bitwidth=args.bitwidth)
+    model = load_model(
+        args.weights, 
+        device=device, 
+        num_classes=1000, 
+        gelu_type=args.gelu_type, 
+        softmax_type=args.softmax_type, 
+        layernorm_type=args.layernorm_type,
+        bitwidth=args.bitwidth,
+        calibration_path=Path(args.data_path) if args.data_path else None,
+        num_calibration_batches=args.num_calibration_batches,
+        batch_size=args.batch_size,
+        strict_load=args.strict_model_load,
+        use_random_calibration_warmup=args.use_random_warmup
+    )
     
     # If --export-onnx flag is provided, export to ONNX and exit.
     if args.export_onnx is not None:
