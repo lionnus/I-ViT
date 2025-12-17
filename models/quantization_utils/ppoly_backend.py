@@ -277,9 +277,9 @@ def compute_integer_coefficients(float_pieces, scaling_factor, N, device, verbos
         print(f"[INFO] Maximum c1 bitwidth (signed): {max_c1_bitwidth} bits")
         print(f"[INFO] Maximum c0 bitwidth (signed): {max_c0_bitwidth} bits ")
         
-    lo_bounds = torch.stack(lo_list)
-    hi_bounds = torch.stack(hi_list)
-    coeffs_tensor = torch.stack(int_coeffs_list)
+    lo_bounds = torch.stack(lo_list).to(torch.int32)
+    hi_bounds = torch.stack(hi_list).to(torch.int32)
+    coeffs_tensor = torch.stack(int_coeffs_list).to(torch.int32)
     
     return lo_bounds, hi_bounds, coeffs_tensor
 
@@ -301,7 +301,8 @@ def evaluate_piecewise_polynomial(x_int, lo_bounds, hi_bounds, coeffs_tensor, se
     """
     # Initialize output
     y_int = torch.zeros_like(x_int, dtype=torch.int32)
-
+    x_int = x_int.to(torch.int64)
+    
     # Evaluate polynomial for each segment
     for i in range(segments):
         if i == 0:
@@ -315,14 +316,13 @@ def evaluate_piecewise_polynomial(x_int, lo_bounds, hi_bounds, coeffs_tensor, se
             continue
 
         x_seg = x_int[mask_i]
-        c = coeffs_tensor[i]
+        c = coeffs_tensor[i].to(torch.int32)
 
         # Horner's rule for polynomial evaluation
-        r = c[0].to(x_seg.dtype)
+        r = c[0].to(x_int.dtype)
         for idx in range(1, degree + 1):
-            r_mult = r * x_seg
+            r_mult = r * x_seg.to(x_int.dtype)
             r_add = r_mult + c[idx]
-            
 
             # Check if value exceeds accumulator bitwidth
             if torch.max(torch.abs(r_mult)).item() >= 2 ** (ACCUMULATOR_BITWIDTH - 1):
