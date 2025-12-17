@@ -236,7 +236,7 @@ def evaluate_dataset(model, data_loader, device, *, print_batch_stats: bool = Tr
     tuple[float, float]
         Top-1 and Top-5 accuracy in percent.
     """
-    correct1 = correct5 = tot = 0
+    correct1 = correct3 = correct5 = tot = 0
     batch_times: list[float] = []
     start_total = time.perf_counter()
 
@@ -249,6 +249,7 @@ def evaluate_dataset(model, data_loader, device, *, print_batch_stats: bool = Tr
             _, pred5 = logits.topk(5, dim=1)
             pred1 = pred5[:, 0]
             correct1 += (pred1 == targets).sum().item()
+            correct3 += sum(t in p for t, p in zip(targets, pred5[:, :3]))
             correct5 += sum(t in p for t, p in zip(targets, pred5))
             tot += imgs.size(0)
             t_batch = time.perf_counter() - t0
@@ -263,7 +264,7 @@ def evaluate_dataset(model, data_loader, device, *, print_batch_stats: bool = Tr
         f"avg/batch={avg_batch*1000:.1f} ms | "
         f"avg/img={avg_img*1000:.2f} ms")
 
-    return 100 * correct1 / tot, 100 * correct5 / tot
+    return 100 * correct1 / tot, 100 * correct3 / tot, 100 * correct5 / tot
 
 
 # -----------------------------------------------------------------------------
@@ -392,8 +393,8 @@ def main():
                         num_workers=16, pin_memory=True)
 
     print(time.strftime("%Y-%m-%d %H:%M:%S"), "Starting evaluation ...")
-    top1, top5 = evaluate_dataset(model, loader, device, print_batch_stats=True)
-    print(f"Validation set: Top-1 = {top1:.2f}%  |  Top-5 = {top5:.2f}%")
+    top1, top3, top5 = evaluate_dataset(model, loader, device, print_batch_stats=True)
+    print(f"Validation set: Top-1 = {top1:.2f}%  |  Top-3 = {top3:.2f}%  |  Top-5 = {top5:.2f}%")
     
     if not args.no_io_stats:
         save_io_stats_df("io_stats_val.pkl", to_csv=True)
