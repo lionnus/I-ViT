@@ -220,9 +220,11 @@ class PPolyIntSoftmax(nn.Module):
         """Compute integer coefficients from float pieces and store if fixed"""
         # The input x_int here is already offset by 128, in range [-127, 128]
         # But we need to fit exp((x - 128) * scaling_factor) = exp(x_original * scaling_factor)
-        # TODO Parameterize
-        x_lo_int = -128  # Hardware constraint
-        x_hi_int = 127   # Hardware constraint
+        # Prepare data for fitting
+        x_lo_int = torch.floor(torch.min(x_int)).item()
+        x_hi_int = torch.ceil(torch.max(x_int)).item()
+        x_lo = x_lo_int * scaling_factor.cpu().numpy()
+        x_hi = x_hi_int * scaling_factor.cpu().numpy()
         
         # Approximating exp((x_int_offset - 127) * scaling_factor)
         if self.backend == 'ibert':
