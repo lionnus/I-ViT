@@ -26,7 +26,7 @@ def optimize_segment_bounds(xs_np, ys_np, x_lo, x_hi, segments, degree, max_iter
         max_iter: Maximum iterations
     
     Returns:
-        Optimized boundaries array
+        Optimized boundaries array (segments+1 points including endpoints)
     """
     # Optimization parameters
     MIN_WIDTH_DIVISOR = 4  # Minimum segment width = total_range / (segments * MIN_WIDTH_DIVISOR)
@@ -228,20 +228,21 @@ def compute_integer_coefficients(float_pieces, scaling_factor, N, device, verbos
         verbose: If True, print bitwidth information
     
     Returns:
-        Tuple of (lo_bounds, hi_bounds, coeffs_tensor)
+        Tuple of (bounds, coeffs_tensor) where:
+            - bounds: tensor of shape [segments-1] containing internal boundary points [b1, b2, ..., b_{segments-1}]
+            - coeffs_tensor: tensor of shape [segments, degree+1] containing coefficients
     """
-    lo_list = []
-    hi_list = []
+    bounds_list = []
     int_coeffs_list = []
     max_c2_bitwidth = 0
     max_c1_bitwidth = 0
     max_c0_bitwidth = 0
     
-    for (lo_f, hi_f), coeffs in float_pieces:
-        lo_i = torch.floor(torch.tensor(lo_f, device=device) / scaling_factor)
-        hi_i = torch.floor(torch.tensor(hi_f, device=device) / scaling_factor)
-        lo_list.append(lo_i)
-        hi_list.append(hi_i)
+    for idx, ((lo_f, hi_f), coeffs) in enumerate(float_pieces):
+        # Only store internal boundaries (skip first lo and last hi)
+        if idx > 0:
+            lo_i = torch.floor(torch.tensor(lo_f, device=device) / scaling_factor)
+            bounds_list.append(lo_i)
         
         # Convert float coeffs to integer coeffs
         deg = len(coeffs) - 1
@@ -276,28 +277,37 @@ def compute_integer_coefficients(float_pieces, scaling_factor, N, device, verbos
         print(f"[INFO] Maximum c2 bitwidth (signed): {max_c2_bitwidth} bits")
         print(f"[INFO] Maximum c1 bitwidth (signed): {max_c1_bitwidth} bits")
         print(f"[INFO] Maximum c0 bitwidth (signed): {max_c0_bitwidth} bits ")
-        
-    lo_bounds = torch.stack(lo_list).to(torch.int32)
-    hi_bounds = torch.stack(hi_list).to(torch.int32)
-    coeffs_tensor = torch.stack(int_coeffs_list).to(torch.int32)
     
-    return lo_bounds, hi_bounds, coeffs_tensor
+    # Stack bounds into [segments-1] tensor (internal boundaries only)
+    if len(bounds_list) > 0:
+        bounds = torch.stack(bounds_list).to(torch.int32)  # Shape: [segments-1]
+    else:
+        # If only 1 segment, no internal boundaries
+        bounds = torch.tensor([], dtype=torch.int32, device=device)
+    
+    coeffs_tensor = torch.stack(int_coeffs_list).to(torch.int32)  # Shape: [segments, degree+1]
+    
+    return bounds, coeffs_tensor
 
 
-def evaluate_piecewise_polynomial(x_int, lo_bounds, hi_bounds, coeffs_tensor, segments, degree):
+def evaluate_piecewise_polynomial(x_int, bounds, coeffs_tensor, segments, degree):
     """
     Evaluate piecewise polynomial using Horner's rule.
     
     Args:
         x_int: Integer input tensor
-        lo_bounds: Lower bounds for each segment
-        hi_bounds: Upper bounds for each segment  
-        coeffs_tensor: Polynomial coefficients for each segment
+        bounds: Bounds tensor of shape [segments-1] containing internal boundary points [b1, b2, ..., b_{segments-1}]
+        coeffs_tensor: Polynomial coefficients tensor of shape [segments, degree+1]
         segments: Number of segments
         degree: Polynomial degree
     
     Returns:
         Output tensor with polynomial evaluation results
+        
+    Segments are defined as:
+        - Segment 0: x < bounds[0]
+        - Segment i (0 < i < segments-1): bounds[i-1] <= x < bounds[i]
+        - Segment segments-1: bounds[segments-2] <= x
     """
     # Initialize output
     y_int = torch.zeros_like(x_int, dtype=torch.int32)
@@ -305,12 +315,18 @@ def evaluate_piecewise_polynomial(x_int, lo_bounds, hi_bounds, coeffs_tensor, se
     
     # Evaluate polynomial for each segment
     for i in range(segments):
-        if i == 0:
-            mask_i = x_int <= hi_bounds[0]
+        if segments == 1:
+            # Only one segment, use all points
+            mask_i = torch.ones_like(x_int, dtype=torch.bool)
+        elif i == 0:
+            # First segment: x < bounds[0]
+            mask_i = x_int < bounds[0]
         elif i == segments - 1:
-            mask_i = x_int >= lo_bounds[-1]
+            # Last segment: bounds[segments-2] <= x
+            mask_i = x_int >= bounds[segments - 2]
         else:
-            mask_i = (x_int >= lo_bounds[i]) & (x_int <= hi_bounds[i])
+            # Middle segments: bounds[i-1] <= x < bounds[i]
+            mask_i = (x_int >= bounds[i - 1]) & (x_int < bounds[i])
 
         if not mask_i.any():
             continue

@@ -1,5 +1,5 @@
 """
-Custom Integer GELU implementation using piecewise polynomial approximation
+Piecewise Polynomial Approximation Modules
 """
 
 import torch
@@ -33,8 +33,7 @@ class PPolyIntGELU(nn.Module):
         self.register_buffer('act_scaling_factor', torch.zeros(1))
         
         # Buffers for storing fixed integer coefficients and bounds
-        self.register_buffer('fixed_lo_bounds', None)
-        self.register_buffer('fixed_hi_bounds', None)
+        self.register_buffer('fixed_bounds', None)
         self.register_buffer('fixed_coeffs', None)
         self.register_buffer('fixed_scaling_factor_out', None)
     
@@ -50,8 +49,7 @@ class PPolyIntGELU(nn.Module):
         """Unfix the module to allow dynamic coefficient computation"""
         self.fixed = False
         # Clear stored coefficients to save memory
-        self.fixed_lo_bounds = None
-        self.fixed_hi_bounds = None
+        self.fixed_bounds = None
         self.fixed_coeffs = None
         self.fixed_scaling_factor_out = None
     
@@ -78,7 +76,7 @@ class PPolyIntGELU(nn.Module):
         float_pieces = fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, self.segments, self.degree, self.alpha, optim_bounds=self.optim_bounds)
         
         # Convert to integer representation
-        lo_bounds, hi_bounds, coeffs_tensor = compute_integer_coefficients(
+        bounds, coeffs_tensor = compute_integer_coefficients(
             float_pieces, scaling_factor, self.N, x.device
         )
         
@@ -95,12 +93,11 @@ class PPolyIntGELU(nn.Module):
         else:   
             scaling_factor_out = scaling_factor / (2 ** self.N)
         
-        self.fixed_lo_bounds = lo_bounds
-        self.fixed_hi_bounds = hi_bounds
+        self.fixed_bounds = bounds
         self.fixed_coeffs = coeffs_tensor
         self.fixed_scaling_factor_out = scaling_factor_out
         
-        return lo_bounds, hi_bounds, coeffs_tensor, scaling_factor_out
+        return bounds, coeffs_tensor, scaling_factor_out
 
     def forward(self, x, scaling_factor):
         """Evaluate piecewise polynomial for integer inputs with float GELU gradients."""
@@ -112,17 +109,16 @@ class PPolyIntGELU(nn.Module):
         with torch.no_grad():
             if self.fixed and self.fixed_coeffs is not None:
                 # Use stored coefficients
-                lo_i = self.fixed_lo_bounds
-                hi_i = self.fixed_hi_bounds
+                bounds_int = self.fixed_bounds
                 coeffs_tensor = self.fixed_coeffs
                 scaling_factor_out = self.fixed_scaling_factor_out
             else:
                 # Compute coefficients (and store if fixed)
-                lo_i, hi_i, coeffs_tensor, scaling_factor_out = self._compute_integer_coefficients(x, scaling_factor)
+                bounds_int, coeffs_tensor, scaling_factor_out = self._compute_integer_coefficients(x, scaling_factor)
         
         # Evaluate polynomial using shared function
         with torch.no_grad():
-            y_int = evaluate_piecewise_polynomial(x_int, lo_i, hi_i, coeffs_tensor, self.segments, self.degree)
+            y_int = evaluate_piecewise_polynomial(x_int, bounds_int, coeffs_tensor, self.segments, self.degree)
         
         # Compute float GELU for gradient path
         y_float_gelu = self.gelu_module(x)
@@ -167,8 +163,7 @@ class PPolyIntSoftmax(nn.Module):
             self.coef[2] /= self.coef[0]
         
         # Buffers for storing fixed coefficients
-        self.register_buffer('fixed_lo_bounds', None)
-        self.register_buffer('fixed_hi_bounds', None)
+        self.register_buffer('fixed_bounds', None)
         self.register_buffer('fixed_coeffs', None)
         self.register_buffer('fixed_scaling_factor_out', None)
     
@@ -211,8 +206,7 @@ class PPolyIntSoftmax(nn.Module):
         """Unfix the module to allow dynamic coefficient computation"""
         self.fixed = False
         # Clear stored coefficients to save memory
-        self.fixed_lo_bounds = None
-        self.fixed_hi_bounds = None
+        self.fixed_bounds = None
         self.fixed_coeffs = None
         self.fixed_scaling_factor_out = None
     
@@ -252,15 +246,14 @@ class PPolyIntSoftmax(nn.Module):
         float_pieces = fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, self.segments, self.degree, self.alpha, optim_bounds=self.optim_bounds)
         
         # Convert to integer representation
-        lo_bounds, hi_bounds, coeffs_tensor = compute_integer_coefficients(
+        bounds, coeffs_tensor = compute_integer_coefficients(
             float_pieces, scaling_factor, self.N, x_int.device
         )
         
-        self.fixed_lo_bounds = lo_bounds
-        self.fixed_hi_bounds = hi_bounds
+        self.fixed_bounds = bounds
         self.fixed_coeffs = coeffs_tensor
         
-        return lo_bounds, hi_bounds, coeffs_tensor
+        return bounds, coeffs_tensor
 
     def int_exp_poly(self, x_int, scaling_factor):
         """Evaluate piecewise polynomial for exponential approximation."""
@@ -268,16 +261,15 @@ class PPolyIntSoftmax(nn.Module):
         with torch.no_grad():
             if self.fixed and self.fixed_coeffs is not None:
                 # Use stored coefficients
-                lo_i = self.fixed_lo_bounds
-                hi_i = self.fixed_hi_bounds
-                coeffs_tensor = self.fixed_coeffs
+                bounds_int = self.fixed_bounds
+                coeffs_int = self.fixed_coeffs
             else:
                 # Compute coefficients
-                lo_i, hi_i, coeffs_tensor = self._compute_integer_coefficients(x_int, scaling_factor)
+                bounds_int, coeffs_int = self._compute_integer_coefficients(x_int, scaling_factor)
 
         # Evaluate polynomial using shared function
         with torch.no_grad():
-            exp_int = evaluate_piecewise_polynomial(x_int, lo_i, hi_i, coeffs_tensor, self.segments, self.degree)
+            exp_int = evaluate_piecewise_polynomial(x_int, bounds_int, coeffs_int, self.segments, self.degree)
         
         # Clamp to ensure positive values (exp should always be positive)
         exp_int = torch.clamp(exp_int, min=0)
@@ -307,7 +299,7 @@ class PPolyIntSoftmax(nn.Module):
         scaling_factor = scaling_factor.to(device)
         
         # Convert to integer representation
-        x_int = floor_ste.apply(x / scaling_factor)
+        x_int = floor_ste.apply(x / scaling_factor).to(torch.int32)
         
         # Subtract max for numerical stability
         x_int_max, _ = x_int.max(dim=-1, keepdim=True)
@@ -317,7 +309,7 @@ class PPolyIntSoftmax(nn.Module):
         exp_int = self.int_exp_poly(x_int, scaling_factor)
         
         # Scale down to fit in output bit
-        exp_int = floor_ste.apply(exp_int / 2 ** (30 - self.exp_bitwidth + 1))
+        exp_int = floor_ste.apply(exp_int / 2 ** (30 - self.exp_bitwidth + 1)) # TODO Check this, why not 32 like in IBERT
         
         # Compute denominator
         exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
