@@ -91,7 +91,7 @@ class PPolyIntGELU(nn.Module):
             scaling_factor_out = scaling_factor_out * (2**n)
             scaling_factor_out = scaling_factor * scaling_factor_out / 2
         else:   
-            scaling_factor_out = scaling_factor / (2 ** self.N)
+            scaling_factor_out = scaling_factor / (2 ** self.N) # TODO: Remove division with N?
         
         self.fixed_bounds = bounds
         self.fixed_coeffs = coeffs_tensor
@@ -139,7 +139,7 @@ class PPolyIntSoftmax(nn.Module):
     Implementation of Integer Softmax using piecewise polynomial approximation for exp()
     """
 
-    def __init__(self, output_bit=8, scale_bits=28, exp_bits=16, seg=16, deg=2, backend='float', alpha=0.0, optim_bounds=False):
+    def __init__(self, output_bit=8, scale_bits=24, exp_bits=16, seg=16, deg=2, backend='float', alpha=0.0, optim_bounds=False):
         super().__init__()
         self.output_bit = output_bit
         self.N = scale_bits  # Bit shift for integer representation
@@ -290,7 +290,7 @@ class PPolyIntSoftmax(nn.Module):
             exp_approx_float = exp_int / (2 ** self.N)
             
             # True exponential is still of the original x_int values
-            exp_true_float = torch.exp(x_int.to(torch.float32) * s)
+            exp_true_float = torch.exp((x_int.to(torch.float32)-127) * s)
         return exp_approx_float, exp_true_float
 
     def forward(self, x, scaling_factor, return_exp_debug: bool = False):
@@ -307,9 +307,9 @@ class PPolyIntSoftmax(nn.Module):
 
         # Apply polynomial exponential approximation with offset input
         exp_int = self.int_exp_poly(x_int, scaling_factor)
-        
-        # Scale down to fit in output bit
-        exp_int = floor_ste.apply(exp_int / 2 ** (30 - self.exp_bitwidth + 1)) # TODO Check this, why not 32 like in IBERT
+        # Shift exp_int to fit in exp_bitwidth
+        shift_value = max(0, self.N - self.exp_bitwidth)
+        exp_int = floor_ste.apply(exp_int / (2 ** shift_value))
         
         # Compute denominator
         exp_int_sum = exp_int.sum(dim=-1, keepdim=True)
