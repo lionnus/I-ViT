@@ -8,7 +8,7 @@
 #
 # Parameters swept:
 # - GELU: degree 1 and 2, segments 8, 16, 32
-# - Softmax: degree 1 and 2, segments 8, 16, 32  
+# - Softmax: degree 1 and 2, segments 8, 16, 32
 # - LayerNorm: fixed to 'ibert'
 #
 # Author: Lionnus Kesting (lkesting@ethz.ch)
@@ -17,21 +17,42 @@
 # --- Configuration Parameters ---
 WEIGHTS_PATH="results/checkpoint_9f32c5ad39174ff88e0107293039530c.pth.tar"
 DATA_PATH="/scratch2/ml_datasets/ILSVRC2012"
-DEVICE="cuda:2"
+DEVICE="cuda:0"
 BATCH_SIZE=128
 PYTHON_ENV="/scratch/lkesting/I-ViT/venv/bin/python"
 WORKSPACE_DIR="/scratch/lkesting/I-ViT"
 
-# --- Sweep Parameters ---
-DEGREES=(1 2)
-SEGMENTS=(8 16 32)
+# --- Sweep Parameters (degrees & segments ONLY) ---
+GELU_DEGREES=(1 2)
+GELU_SEGMENTS=(8 16 32)
+
+SOFTMAX_DEGREES=(1 2)
+SOFTMAX_SEGMENTS=(8 16 32)
+
 LAYERNORM_TYPE="ibert"
+
+# --- Extra params (NOT swept, separate for GELU / Softmax) ---
+GELU_SCALE_BITS=24
+SOFTMAX_SCALE_BITS=24
+SOFTMAX_EXP_BITS=16
+
+GELU_OPTIM_BOUNDS=true      # true / false
+SOFTMAX_OPTIM_BOUNDS=true    # true / false
+
+# backend as param (NOT swept, separate for GELU / Softmax)
+GELU_BACKEND="ibert"
+SOFTMAX_BACKEND="ibert"
 
 # --- Function to generate type string ---
 generate_type_string() {
     local degree=$1
     local segment=$2
-    echo "ppoly_deg_${degree}_seg_${segment}_scale-bits_24_backend_ibert"
+    local scale_bits=$3
+    local backend=$4
+    local optim_bounds=$5
+    local exp_bits=${6:-}
+    
+    echo "ppoly_deg_${degree}_seg_${segment}_scale-bits_${scale_bits}${exp_bits:+_exp-bits_${exp_bits}}_backend_${backend}_optim-bounds_${optim_bounds}"
 }
 
 # --- Main sweep function ---
@@ -47,17 +68,16 @@ run_sweep() {
     echo "Working directory: $WORKSPACE_DIR"
     echo "=========================================="
     
-    # Change to workspace directory
     cd "$WORKSPACE_DIR" || exit 1
     
     local total_configs=0
     local current_config=0
     
     # Count total configurations
-    for gelu_deg in "${DEGREES[@]}"; do
-        for gelu_seg in "${SEGMENTS[@]}"; do
-            for softmax_deg in "${DEGREES[@]}"; do
-                for softmax_seg in "${SEGMENTS[@]}"; do
+    for gelu_deg in "${GELU_DEGREES[@]}"; do
+        for gelu_seg in "${GELU_SEGMENTS[@]}"; do
+            for softmax_deg in "${SOFTMAX_DEGREES[@]}"; do
+                for softmax_seg in "${SOFTMAX_SEGMENTS[@]}"; do
                     ((total_configs++))
                 done
             done
@@ -68,15 +88,17 @@ run_sweep() {
     echo "=========================================="
     
     # Run sweep
-    for gelu_deg in "${DEGREES[@]}"; do
-        for gelu_seg in "${SEGMENTS[@]}"; do
-            for softmax_deg in "${DEGREES[@]}"; do
-                for softmax_seg in "${SEGMENTS[@]}"; do
+    for gelu_deg in "${GELU_DEGREES[@]}"; do
+        for gelu_seg in "${GELU_SEGMENTS[@]}"; do
+            for softmax_deg in "${SOFTMAX_DEGREES[@]}"; do
+                for softmax_seg in "${SOFTMAX_SEGMENTS[@]}"; do
                     ((current_config++))
                     
-                    # Generate type strings
-                    gelu_type=$(generate_type_string $gelu_deg $gelu_seg)
-                    softmax_type=$(generate_type_string $softmax_deg $softmax_seg)
+                    gelu_type=$(generate_type_string \
+                        "$gelu_deg" "$gelu_seg" "$GELU_SCALE_BITS" "$GELU_BACKEND" "$GELU_OPTIM_BOUNDS")
+                    
+                    softmax_type=$(generate_type_string \
+                        "$softmax_deg" "$softmax_seg" "$SOFTMAX_SCALE_BITS" "$SOFTMAX_BACKEND" "$SOFTMAX_OPTIM_BOUNDS" "$SOFTMAX_EXP_BITS")
                     
                     echo ""
                     echo "[$current_config/$total_configs] Configuration:"
@@ -85,7 +107,6 @@ run_sweep() {
                     echo "  LayerNorm: $LAYERNORM_TYPE"
                     echo "----------------------------------------"
                     
-                    # Run inference
                     start_time=$(date +%s)
                     
                     "$PYTHON_ENV" -m scripts.inference \
@@ -97,16 +118,16 @@ run_sweep() {
                         --softmax-type "$softmax_type" \
                         --layernorm-type "$LAYERNORM_TYPE" \
                         --use-random-warmup \
-                        --no-io-stats \
+                        --no-io-stats 
                     
                     exit_code=$?
                     end_time=$(date +%s)
                     duration=$((end_time - start_time))
                     
                     if [ $exit_code -eq 0 ]; then
-                        echo "✓ Configuration completed successfully in ${duration}s"
+                        echo "? Configuration completed successfully in ${duration}s"
                     else
-                        echo "✗ Configuration failed with exit code $exit_code after ${duration}s"
+                        echo "? Configuration failed with exit code $exit_code after ${duration}s"
                     fi
                     
                     echo "========================================"
