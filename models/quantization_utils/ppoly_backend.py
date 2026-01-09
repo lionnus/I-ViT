@@ -8,10 +8,6 @@ import math
 import matplotlib.pyplot as plt
 import warnings
 
-# Accumulator bitwidth constant
-ACCUMULATOR_BITWIDTH = 32
-
-
 def optimize_segment_bounds(xs_np, ys_np, x_lo, x_hi, segments, degree, max_iter=10):
     """
     Optimize segment boundaries using coordinate descent.
@@ -212,85 +208,118 @@ def fit_piecewise_polynomials(xs_np, ys_np, x_lo, x_hi, segments, degree, alpha=
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.show()
-    
+        
     return pieces
 
 
-def compute_integer_coefficients(float_pieces, scaling_factor, N, device, verbose=False):
+def compute_integer_coefficients(float_pieces, scaling_factor, device, accumulator_bitwidth=None, N=None, verbose=True):
     """
     Convert float polynomial pieces to integer representation.
-    
     Args:
-        float_pieces: List of ((lo, hi), coeffs) tuples from fit_piecewise_polynomials
-        scaling_factor: Scaling factor for integer conversion
-        N: Bit shift for integer representation
-        device: PyTorch device to place tensors on
-        verbose: If True, print bitwidth information
-    
+        float_pieces: List of ((lo, hi), coeffs) tuples for each segment
+        scaling_factor: Scaling factor for input x
+        device: Torch device for tensors
+        accumulator_bitwidth: If provided, use accumulator-based scaling
+        N: If provided, use fixed N-bit scaling
+        verbose: If True, print debug information
     Returns:
-        Tuple of (bounds, coeffs_tensor) where:
-            - bounds: tensor of shape [segments-1] containing internal boundary points [b1, b2, ..., b_{segments-1}]
-            - coeffs_tensor: tensor of shape [segments, degree+1] containing coefficients
+        bounds: Tensor of shape [segments-1] with internal boundary points
+        coeffs_tensor: Tensor of shape [segments, degree+1] with integer coefficients
+        K or N: Scaling exponent used (K for accumulator-based, N for fixed N-bit
     """
     bounds_list = []
     int_coeffs_list = []
-    max_c2_bitwidth = 0
-    max_c1_bitwidth = 0
-    max_c0_bitwidth = 0
-    
+    assert accumulator_bitwidth is not None or N is not None, "Either accumulator_bitwidth or N must be provided"
+
+    degree = len(float_pieces[0][1]) - 1
+    BW_X = 8  # TODO Pass the bitwidth of x as argument
+
+    use_acc_bw = accumulator_bitwidth is not None
+    if use_acc_bw:
+        if degree == 1:
+            BW_C = {
+                1: accumulator_bitwidth - 1,
+                0: accumulator_bitwidth - 1 - BW_X,
+            }
+        elif degree == 2:
+            BW_C = {
+                2: accumulator_bitwidth - 2 - 2 * BW_X,
+                1: accumulator_bitwidth - 2 - BW_X,
+                0: accumulator_bitwidth - 1,
+            }
+        else:
+            raise ValueError(f"Accumulator-based scaling only supports degree 1 or 2 (got {degree})")
+
+        # Max magnitude of base-scaled coefficients per power across all segments
+        max_abs_by_power = {p: 0.0 for p in range(degree + 1)}
+        for (_, coeffs) in float_pieces:
+            deg = len(coeffs) - 1
+            for i, coeff in enumerate(coeffs):
+                power = deg - i
+                base_scaled = float(coeff) * float(scaling_factor ** power)
+                max_abs_by_power[power] = max(max_abs_by_power[power], abs(base_scaled))
+
+        # Compute global feasible gain upper bound
+        g_max = float("inf")
+        for power, bw in BW_C.items():
+            M = max_abs_by_power.get(power, 0.0)
+            if bw <= 0:
+                g_max = 0.0
+                continue
+            L = float((2 ** bw) - 1)
+            if M == 0.0:
+                continue
+            g_max = min(g_max, L / M)
+
+        # Choose power-of-two gain G = 2^K <= g_max
+        if not math.isfinite(g_max) or g_max <= 0.0:
+            K = 0
+        else:
+            K = int(math.floor(math.log2(g_max)))
+            if K < 0:
+                K = 0
+
+        if verbose:
+            for p in sorted(BW_C.keys(), reverse=True):
+                print(f"[INFO] power={p}, BW={BW_C[p]}, max_abs={max_abs_by_power[p]:.6g}")
+            print(f"[INFO] g_max={g_max:.6g}, chosen K={K}, G=2^{K}={2**K}")
+
     for idx, ((lo_f, hi_f), coeffs) in enumerate(float_pieces):
-        # Only store internal boundaries (skip first lo and last hi)
         if idx > 0:
             lo_i = torch.floor(torch.tensor(lo_f, device=device) / scaling_factor)
             bounds_list.append(lo_i)
-        
-        # Convert float coeffs to integer coeffs
+
         deg = len(coeffs) - 1
         this_int_coeffs = []
         for i, coeff in enumerate(coeffs):
             power = deg - i
-            scaled = coeff * (scaling_factor ** power) * (2 ** N)
-            int_coeff = torch.floor(scaled.clone().detach())
-            
-            # Calculate coefficient bit-width
-            abs_val = torch.abs(int_coeff).item()
-            if abs_val == 0:
-                bitwidth = 1
+            if use_acc_bw:
+                base_scaled = float(coeff) * float(scaling_factor ** power)
+                scaled = base_scaled * float(2 ** K)
+                int_coeff = torch.floor(torch.tensor(scaled, device=device, dtype=torch.float64))
             else:
-                # For signed numbers, we need log2(abs_val) + 1 bits (including sign bit)
-                bitwidth = int(torch.ceil(torch.log2(torch.tensor(abs_val + 1))).item()) + 1
-            
-            # Track max bitwidth for each coefficient position separately
-            coeff_index = deg - i  # This gives us the actual coefficient index (c2, c1, c0)
-            if coeff_index == 2:
-                max_c2_bitwidth = max(max_c2_bitwidth, bitwidth)
-            elif coeff_index == 1:
-                max_c1_bitwidth = max(max_c1_bitwidth, bitwidth)
-            elif coeff_index == 0:
-                max_c0_bitwidth = max(max_c0_bitwidth, bitwidth)
-            
+                scaled = coeff * (scaling_factor ** power) * (2 ** N)
+                int_coeff = torch.floor(scaled.clone().detach())
+
             this_int_coeffs.append(int_coeff)
+
         int_coeffs_list.append(torch.stack(this_int_coeffs))
-    
-    # Print max bitwidth for each coefficient separately, if verbose
-    if verbose:
-        print(f"[INFO] Maximum c2 bitwidth (signed): {max_c2_bitwidth} bits")
-        print(f"[INFO] Maximum c1 bitwidth (signed): {max_c1_bitwidth} bits")
-        print(f"[INFO] Maximum c0 bitwidth (signed): {max_c0_bitwidth} bits ")
-    
-    # Stack bounds into [segments-1] tensor (internal boundaries only)
+
     if len(bounds_list) > 0:
-        bounds = torch.stack(bounds_list).to(torch.int32)  # Shape: [segments-1]
+        bounds = torch.stack(bounds_list).to(torch.int32)
     else:
-        # If only 1 segment, no internal boundaries
         bounds = torch.tensor([], dtype=torch.int32, device=device)
-    
-    coeffs_tensor = torch.stack(int_coeffs_list).to(torch.int32)  # Shape: [segments, degree+1]
-    
-    return bounds, coeffs_tensor
+
+    coeffs_tensor = torch.stack(int_coeffs_list).to(torch.int64)
+    if verbose:
+        abs_coeffs = torch.abs(coeffs_tensor.to(torch.int64))
+        used_bits = torch.where(abs_coeffs == 0, torch.ones_like(abs_coeffs), torch.floor(torch.log2(abs_coeffs)) + 2).to(torch.int64)
+        print("[INFO] used bits per coeff (max over segments):", used_bits.max(dim=0).values.tolist())
+
+    return bounds, coeffs_tensor, K if use_acc_bw else N
 
 
-def evaluate_piecewise_polynomial(x_int, bounds, coeffs_tensor, segments, degree):
+def evaluate_piecewise_polynomial(x_int, bounds, coeffs_tensor, segments, degree, accumulator_bitwidth=32, verbose=True):
     """
     Evaluate piecewise polynomial using Horner's rule.
     
@@ -300,6 +329,8 @@ def evaluate_piecewise_polynomial(x_int, bounds, coeffs_tensor, segments, degree
         coeffs_tensor: Polynomial coefficients tensor of shape [segments, degree+1]
         segments: Number of segments
         degree: Polynomial degree
+        accumulator_bitwidth: Bitwidth for accumulator overflow checks (default: 32)
+        verbose: If True, print warnings about accumulator overflow (default: True)
     
     Returns:
         Output tensor with polynomial evaluation results
@@ -310,7 +341,7 @@ def evaluate_piecewise_polynomial(x_int, bounds, coeffs_tensor, segments, degree
         - Segment segments-1: bounds[segments-2] <= x
     """
     # Initialize output
-    y_int = torch.zeros_like(x_int, dtype=torch.int32)
+    y_int = torch.zeros_like(x_int, dtype=torch.int64)
     x_int = x_int.to(torch.int64)
     
     # Evaluate polynomial for each segment
@@ -332,7 +363,7 @@ def evaluate_piecewise_polynomial(x_int, bounds, coeffs_tensor, segments, degree
             continue
 
         x_seg = x_int[mask_i]
-        c = coeffs_tensor[i].to(torch.int32)
+        c = coeffs_tensor[i].to(torch.int64)
 
         # Horner's rule for polynomial evaluation
         r = c[0].to(x_int.dtype)
@@ -341,12 +372,13 @@ def evaluate_piecewise_polynomial(x_int, bounds, coeffs_tensor, segments, degree
             r_add = r_mult + c[idx]
 
             # Check if value exceeds accumulator bitwidth
-            if torch.max(torch.abs(r_mult)).item() >= 2 ** (ACCUMULATOR_BITWIDTH - 1):
-                print(f"[WARNING] Mult accumulator exceeds {ACCUMULATOR_BITWIDTH} bits signed in segment {i}, degree {idx}")
-            if torch.max(torch.abs(r_add)).item() >= 2 ** (ACCUMULATOR_BITWIDTH - 1):
-                print(f"[WARNING] Add accumulator exceeds {ACCUMULATOR_BITWIDTH} bits signed in segment {i}, degree {idx}")
+            if verbose:
+                if torch.max(torch.abs(r_mult)).item() >= 2 ** (accumulator_bitwidth - 1):
+                    print(f"[WARNING] Mult accumulator exceeds {accumulator_bitwidth} bits signed in segment {i}, degree {idx}")
+                if torch.max(torch.abs(r_add)).item() >= 2 ** (accumulator_bitwidth - 1):
+                    print(f"[WARNING] Add accumulator exceeds {accumulator_bitwidth} bits signed in segment {i}, degree {idx}")
             r = r_add
 
-        y_int[mask_i] = r.to(torch.int32)
+        y_int[mask_i] = r.to(torch.int64)
 
     return y_int
